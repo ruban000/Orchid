@@ -24,12 +24,20 @@ jobs:
           echo "Eden source cloned successfully."
           git -C eden-nx2-android log -1 --oneline
 
-      - name: Inspect Android build instructions
+      - name: Inspect Android build configuration
         run: |
           cd eden-nx2-android
-          echo "===== Android developer notes ====="
-          sed -n '1,180p' NX2_ANDROID.md
-          echo "===== Android build script ====="
-          sed -n '1,240p' tools/nx2/android/build_install.sh
-          echo "===== Android-related build files ====="
-          find . -maxdepth 4 -type f \( -name 'gradlew' -o -name 'settings.gradle*' -o -name 'build.gradle*' -o -name 'CMakeLists.txt' \) | head -100
+          echo "===== Android environment script ====="
+          sed -n '1,240p' tools/nx2/android/env.sh
+          echo "===== Android CI build script ====="
+          sed -n '1,280p' .ci/android/build.sh
+          echo "===== Android root Gradle file ====="
+          sed -n '1,220p' src/android/build.gradle.kts
+          echo "===== Android app Gradle file ====="
+          sed -n '1,260p' src/android/app/build.gradle.kts
+          echo "===== Android settings ====="
+          sed -n '1,180p' src/android/settings.gradle.kts
+          echo "===== Submodule status ====="
+          git submodule status
+          echo "===== APK and package configuration references ====="
+          grep -R -n -E 'applicationId|namespace|versionName|versionCode|app-mainline|ANDROID_ABI|CMAKE_ANDROID' src/android tools/nx2/android .ci/android 2>/dev/null | head -160
