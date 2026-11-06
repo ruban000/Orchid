@@ -96,6 +96,7 @@ add_executable(tests
     video_core/ampere_yoshi_shift.cpp
     video_core/ampere_yoshi_uniform_shift.cpp
     video_core/ampere_yoshi_cbuf_carry.cpp
+    video_core/ampere_yoshi_uniform_carry.cpp
     video_core/ampere_yoshi_lea_carry.cpp
     video_core/maxwell_shr.cpp
     video_core/ampere_release_guards.cpp

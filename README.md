@@ -24,6 +24,7 @@ Mario Tennis Fever first, plus the shader, kernel and graphics work other games 
 > or Eden developers, so please do not report them there.
 
 <p align="center">
+  <a href="#project-scope">Project scope</a> |
   <a href="#branches-and-builds">Branches and builds</a> |
   <a href="#what-orchid-adds">What Orchid adds</a> |
   <a href="#performance-and-compatibility">Performance</a> |
@@ -32,6 +33,24 @@ Mario Tennis Fever first, plus the shader, kernel and graphics work other games 
   <a href="#documentation">Documentation</a> |
   <a href="#license">License</a>
 </p>
+
+## Project scope
+
+Orchid's support and development focus is on demonstrably improving these games:
+
+- Mario Tennis Fever
+- Both Hyrule Warriors games
+- Pokémon Pokopia
+- Star Fox
+- Super Mario Bros. Wonder
+- Yoshi and the Mysterious Book
+- Donkey Kong Bananza
+- Kirby Air Riders
+- Kirby and the Forgotten Land
+
+These are the project's target games; inclusion here does not mean a game is already fully
+playable or free of issues. See [Performance and compatibility](#performance-and-compatibility)
+for the currently reported results and their test conditions.
 
 ## Branches and builds
 

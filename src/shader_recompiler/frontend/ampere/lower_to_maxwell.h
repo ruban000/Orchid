@@ -167,6 +167,15 @@ inline LoweredProgram LowerToMaxwell(std::span<const Instruction> code, bool geo
             high_uniform_bank = true;
             return 152 + reg;
         };
+        // Captured UIADD3 carry pair: restrict the new handling to PT, UR0-UR21,
+        // unmodified operands and UP1/UP0. Other forms retain their existing guards.
+        const bool uniform_carry_registers = opcode == 0x290 && insn.Bits(12, 4) == 7 &&
+            insn.Bits(16, 8) < 22 && insn.Bits(24, 8) < 22 && insn.words[1] < 22 &&
+            insn.Bits(64, 8) < 22 && !(insn.words[3] & 0xc00001ffU);
+        const bool uniform_carry_producer = uniform_carry_registers &&
+            (insn.words[2] & ~0xffU) == 0x0f83e000U;
+        const bool uniform_carry_consumer = uniform_carry_registers &&
+            (insn.words[2] & ~0xffU) == 0x08fe0400U;
         bool rewritten_uniform = false;
         bool uniform_guard = false;
         bool checked_guard = false;
@@ -3617,6 +3626,31 @@ case 0x311: { // F2I.FTZ.U64.TRUNC, per nvdisasm: Maxwell's F2I gives 32 bits, s
             break;
         }
         case 0x210: case 0x810: case 0xa10: case 0xc10: { // IADD3 with zero third source and no carry outputs
+            if (uniform_carry_producer) {
+                const u32 a = insn.Bits(24, 8), b = insn.Bits(32, 8), c = insn.Bits(64, 8);
+                constexpr u32 mask = (1U << 5) | (1U << 6); // UP1 and UP0
+                save_predicate(mask);
+                emit(0x5c10000000000000ULL | predicate | 250 | (u64{a} << 8) | (u64{b} << 20));
+                unsigned_less(5, 250, a);
+                emit(0x5c10000000000000ULL | predicate | 251 | (u64{250} << 8) | (u64{c} << 20));
+                unsigned_less(6, 251, 250);
+                emit(0x38e8000000070000ULL | 239 | (u64{239} << 8) | (u64{mask} << 20));
+                restore_predicate(mask);
+                emit(base(0x5c98000000000000ULL) | (u64{15} << 39) | (u64{251} << 20));
+                break;
+            }
+            if (uniform_carry_consumer) {
+                const u32 a = insn.Bits(24, 8), b = insn.Bits(32, 8), c = insn.Bits(64, 8);
+                emit(0x5c10000000000000ULL | predicate | 250 | (u64{a} << 8) | (u64{b} << 20));
+                emit(0x5c10000000000000ULL | predicate | 251 | (u64{250} << 8) | (u64{c} << 20));
+                for (u32 bit : {5U, 6U}) {
+                    emit(0x3800000000000000ULL | predicate | 252 | (u64{239} << 8) |
+                         (u64{bit | (1U << 8)} << 20));
+                    emit(0x5c10000000000000ULL | predicate | 251 | (u64{251} << 8) | (u64{252} << 20));
+                }
+                emit(base(0x5c98000000000000ULL) | (u64{15} << 39) | (u64{251} << 20));
+                break;
+            }
             // 64-bit adds: IADD3 with a carry-out predicate (bits 81-83), then IADD3.X (bit 74) with
             // a carry-in predicate (bits 87-89, negate 90). Uniform forms keep UPn in R239 bit 6-n.
             if ((opcode == 0x210 || opcode == 0x810 || opcode == 0xa10) && insn.Bits(64, 8) == 255 &&
