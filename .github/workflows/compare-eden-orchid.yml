@@ -1,0 +1,41 @@
+name: Compare Eden NX2 and Orchid
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Git
+        run: git --version
+
+      - name: Clone Eden NX2 Android
+        run: git clone --filter=blob:none https://git.eden-emu.dev/moceure/eden-nx2-android.git eden
+
+      - name: Clone Orchid
+        run: git clone --filter=blob:none https://github.com/ruban000/Orchid.git orchid
+
+      - name: Compare source histories
+        shell: bash
+        run: |
+          set -e
+          echo "## Repository heads" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Eden: $(git -C eden rev-parse --short HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Orchid: $(git -C orchid rev-parse --short HEAD)" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+
+          if BASE=$(git -C eden merge-base HEAD "$(git -C "$GITHUB_WORKSPACE/orchid" rev-parse HEAD)" 2>/dev/null); then
+            echo "## Shared history" >> "$GITHUB_STEP_SUMMARY"
+            echo "Merge base: `$BASE`" >> "$GITHUB_STEP_SUMMARY"
+            git -C eden log --left-right --cherry-pick --oneline HEAD..."$(git -C "$GITHUB_WORKSPACE/orchid" rev-parse HEAD)" | head -200 >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## No shared Git ancestor detected" >> "$GITHUB_STEP_SUMMARY"
+            echo "The projects must be compared by source files and commit content; no automatic merge will be attempted." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "## Android build entry points" >> "$GITHUB_STEP_SUMMARY"
+          find eden -maxdepth 5 \( -iname '*android*' -o -name 'build_install.sh' \) -type f | head -100 >> "$GITHUB_STEP_SUMMARY"
