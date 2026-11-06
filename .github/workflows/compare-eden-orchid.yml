@@ -15,31 +15,55 @@ jobs:
       - name: Clone Orchid
         run: git clone https://github.com/ruban000/Orchid.git orchid
 
-      - name: Compare source histories
+      - name: Compare source files safely
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
           EDEN_HEAD=$(git -C eden rev-parse --short HEAD)
           ORCHID_HEAD=$(git -C orchid rev-parse --short HEAD)
-          echo "## Repository heads" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Eden: $EDEN_HEAD" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Orchid: $ORCHID_HEAD" >> "$GITHUB_STEP_SUMMARY"
-          echo >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Repository heads"
+            echo "- Eden NX2 Android: $EDEN_HEAD"
+            echo "- Orchid: $ORCHID_HEAD"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
 
-          git -C eden fetch "$GITHUB_WORKSPACE/orchid" HEAD:refs/remotes/orchid/head
-          if BASE=$(git -C eden merge-base HEAD refs/remotes/orchid/head 2>/dev/null); then
-            echo "## Shared history" >> "$GITHUB_STEP_SUMMARY"
-            echo "Merge base: `$BASE`" >> "$GITHUB_STEP_SUMMARY"
-            git -C eden log --left-right --cherry-pick --oneline HEAD...refs/remotes/orchid/head | head -200 >> "$GITHUB_STEP_SUMMARY"
+          TARGET="src/shader_recompiler/frontend/ampere/lower_to_maxwell.h"
+          {
+            echo "## Orchid shader-fix candidate"
+            echo "Compared path: $TARGET"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -f "eden/$TARGET" ] && [ -f "orchid/$TARGET" ]; then
+            echo "- File exists in both repositories." >> "$GITHUB_STEP_SUMMARY"
+            if git diff --no-index --quiet "eden/$TARGET" "orchid/$TARGET"; then
+              echo "- Files are identical." >> "$GITHUB_STEP_SUMMARY"
+            else
+              DIFF_STATUS=$?
+              if [ "$DIFF_STATUS" -eq 1 ]; then
+                echo "- Files differ. Diff (first 240 lines):" >> "$GITHUB_STEP_SUMMARY"
+                echo '---' >> "$GITHUB_STEP_SUMMARY"
+                git diff --no-index -- "eden/$TARGET" "orchid/$TARGET" > /tmp/candidate.diff || true
+                sed -n '1,240p' /tmp/candidate.diff >> "$GITHUB_STEP_SUMMARY"
+                echo '---' >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "Diff failed with exit code $DIFF_STATUS." >> "$GITHUB_STEP_SUMMARY"
+                exit "$DIFF_STATUS"
+              fi
+            fi
           else
-            echo "## No shared Git ancestor detected" >> "$GITHUB_STEP_SUMMARY"
-            echo "The projects must be compared by source files and commit content; no automatic merge will be attempted." >> "$GITHUB_STEP_SUMMARY"
+            echo "- Candidate file is not present in both repositories." >> "$GITHUB_STEP_SUMMARY"
+            [ -f "eden/$TARGET" ] && echo "- Present in Eden." >> "$GITHUB_STEP_SUMMARY" || echo "- Missing in Eden." >> "$GITHUB_STEP_SUMMARY"
+            [ -f "orchid/$TARGET" ] && echo "- Present in Orchid." >> "$GITHUB_STEP_SUMMARY" || echo "- Missing in Orchid." >> "$GITHUB_STEP_SUMMARY"
           fi
 
           echo >> "$GITHUB_STEP_SUMMARY"
-          echo "## Android build entry points" >> "$GITHUB_STEP_SUMMARY"
-          find eden -maxdepth 7 \( -iname '*android*' -o -name 'build_install.sh' -o -name 'settings.gradle*' -o -name 'build.gradle*' \) -type f | head -150 >> "$GITHUB_STEP_SUMMARY"
+          echo "## Matching Android/build file paths" >> "$GITHUB_STEP_SUMMARY"
+          find eden -type f \( -name 'AndroidManifest.xml' -o -name 'build.gradle' -o -name 'build.gradle.kts' -o -name 'settings.gradle' -o -name 'settings.gradle.kts' \) -print | sed 's#^eden/##' | sort > /tmp/eden-build-files
+          find orchid -type f \( -name 'AndroidManifest.xml' -o -name 'build.gradle' -o -name 'build.gradle.kts' -o -name 'settings.gradle' -o -name 'settings.gradle.kts' \) -print | sed 's#^orchid/##' | sort > /tmp/orchid-build-files
+          comm -12 /tmp/eden-build-files /tmp/orchid-build-files | sed -n '1,150p' >> "$GITHUB_STEP_SUMMARY"
 
           echo >> "$GITHUB_STEP_SUMMARY"
-          echo "## Android package identifiers" >> "$GITHUB_STEP_SUMMARY"
-          grep -RIn --include='*.gradle' --include='*.gradle.kts' --include='AndroidManifest.xml' 'applicationId\|package=' eden 2>/dev/null | head -50 >> "$GITHUB_STEP_SUMMARY" || true
+          echo "## Safety" >> "$GITHUB_STEP_SUMMARY"
+          echo "This workflow only reads and compares files. It does not merge, edit source code, or build/replace the working APK." >> "$GITHUB_STEP_SUMMARY"
