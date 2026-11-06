@@ -39,6 +39,12 @@ jobs:
           git submodule update --init --recursive
           git log -1 --oneline
 
+      - name: Inspect Android package configuration
+        working-directory: eden-nx2-android
+        run: |
+          echo 'Android Gradle package configuration:'
+          grep -RInE 'applicationId|namespace|dev\\.eden\\.nx2' src/android/app --include='*.gradle' --include='*.gradle.kts' --include='AndroidManifest.xml' || true
+
       - name: Build Eden NX2 Android APK
         working-directory: eden-nx2-android
         run: |
