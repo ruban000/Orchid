@@ -59,6 +59,24 @@ jobs:
           fi
 
           echo >> "$GITHUB_STEP_SUMMARY"
+          echo "## Focused IADD3 carry-handling code" >> "$GITHUB_STEP_SUMMARY"
+          for REPO in eden orchid; do
+            echo "### $REPO" >> "$GITHUB_STEP_SUMMARY"
+            FILE="$REPO/$TARGET"
+            if [ -f "$FILE" ]; then
+              if grep -q "uniform_carry_producer" "$FILE"; then
+                grep -n -B 8 -A 55 "uniform_carry_producer" "$FILE" | sed -n '1,90p' >> "$GITHUB_STEP_SUMMARY"
+                grep -n -B 8 -A 35 "if (uniform_carry_consumer)" "$FILE" | sed -n '1,65p' >> "$GITHUB_STEP_SUMMARY" || true
+              else
+                echo "No uniform_carry_producer marker found in this file." >> "$GITHUB_STEP_SUMMARY"
+              fi
+            else
+              echo "Candidate shader file is missing." >> "$GITHUB_STEP_SUMMARY"
+            fi
+            echo >> "$GITHUB_STEP_SUMMARY"
+          done
+
+          echo >> "$GITHUB_STEP_SUMMARY"
           echo "## Matching Android/build file paths" >> "$GITHUB_STEP_SUMMARY"
           find eden -type f \( -name 'AndroidManifest.xml' -o -name 'build.gradle' -o -name 'build.gradle.kts' -o -name 'settings.gradle' -o -name 'settings.gradle.kts' \) -print | sed 's#^eden/##' | sort > /tmp/eden-build-files
           find orchid -type f \( -name 'AndroidManifest.xml' -o -name 'build.gradle' -o -name 'build.gradle.kts' -o -name 'settings.gradle' -o -name 'settings.gradle.kts' \) -print | sed 's#^orchid/##' | sort > /tmp/orchid-build-files
