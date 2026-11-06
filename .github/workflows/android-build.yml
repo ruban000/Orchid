@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Java
@@ -40,19 +40,18 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install Android build tools
-        run: |
-          sdkmanager "ndk;27.2.12479018" "cmake;3.22.1"
+      - name: Install NDK and CMake
+        run: sdkmanager "ndk;27.2.12479018" "cmake;3.22.1"
 
-      - name: Build Android APK and AAB
+      - name: Build Android
         run: |
           chmod +x .ci/android/build.sh
           .ci/android/build.sh \
             --release \
-            --target "${{ inputs.target }}" \
-            --build-type "${{ inputs.build_type }}"
+            -t "${{ inputs.target }}" \
+            -b "${{ inputs.build_type }}"
 
-      - name: Upload build files
+      - name: Upload Android files
         uses: actions/upload-artifact@v4
         with:
           name: orchid-android-${{ inputs.target }}
