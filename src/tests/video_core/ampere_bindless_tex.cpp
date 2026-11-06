@@ -492,25 +492,6 @@ TEST_CASE("Ampere uniform bindless TEX stops provenance at writes to the handle 
     }
 }
 
-TEST_CASE("Ampere uniform bindless TEX counts R2UR as a single uniform write",
-          "[video_core][ampere][bindless_tex]") {
-    // Ocarina's fragment shader: R2UR UR9 between the copy into UR10 and the TEX on UR10/UR11.
-    // The lowered R2UR form writes only URd, so URd = handle - 1 keeps the pair.
-    const auto r2ur = [](u32 target, u32 mode) {
-        return Instruction{{0x020073c2U | (target << 16), 0, mode, 0}};
-    };
-    const auto lower = [&](Instruction clobber) {
-        const std::array<Instruction, 4> code{{sample[0], clobber, sample[1], sample[2]}};
-        return LowerToMaxwell(code);
-    };
-    REQUIRE(static_cast<bool>(lower(r2ur(3, 0x000e0000))));
-    for (const u32 target : {4U, 5U}) {
-        const auto lowered = lower(r2ur(target, 0x000e0000));
-        REQUIRE_FALSE(static_cast<bool>(lowered));
-        REQUIRE(lowered.error_offset == 32);
-    }
-}
-
 TEST_CASE("Ampere uniform bindless TEX preserves scalar and pair result masks",
           "[video_core][ampere][bindless_tex]") {
     for (const Instruction texture : {
@@ -600,8 +581,9 @@ TEST_CASE("Ampere uniform bindless TEX rejects unverified handle pairs and contr
         REQUIRE(lowered.error_offset == 16);
         REQUIRE(lowered.instructions.empty());
     }
-    // BRX / BRXU tables are taken as forward only: a write of the pair after the texture cannot
-    // reach it again, so the texture passes and the BRX itself is refused for its relative base.
+    // BRX / BRXU tables may land anywhere: accepted only while every uniform write of the pair is
+    // followed by the shift before any control transfer (here the BRX itself is then refused for
+    // its relative base, after the texture), refused at the texture otherwise.
     for (const u32 opcode : {0x949U, 0x958U}) {
         const std::array<Instruction, 4> table{{sample[0], sample[1],
                                               {{0x7000U | opcode, 0, 0x03800000, 0}}, sample[2]}};
@@ -610,7 +592,7 @@ TEST_CASE("Ampere uniform bindless TEX rejects unverified handle pairs and contr
                                                   {{0x7000U | opcode, 0, 0x03800000, 0}}, sample[2]}};
         const auto lowered = LowerToMaxwell(clobbered);
         REQUIRE_FALSE(static_cast<bool>(lowered));
-        REQUIRE(lowered.error_offset == 48);
+        REQUIRE(lowered.error_offset == 16);
     }
     // After a write of the handle, a branch into the window skips the shift; a loop before the
     // shift does not touch the pair.

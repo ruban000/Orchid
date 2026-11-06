@@ -189,6 +189,7 @@ private:
     std::vector<GraphicsPipelineCacheKey> transition_keys;
     std::vector<GraphicsPipeline*> transitions;
     u64 last_use_frame{};
+    s64 hitch_trace_queued_ns{};
 
     std::shared_ptr<const GraphicsShaderModules> spv_modules;
 

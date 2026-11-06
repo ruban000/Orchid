@@ -16,21 +16,17 @@ TEST_CASE("Native compute pointers use their mapped extent, not the next paramet
     constexpr u32 mib = 1024 * 1024;
     using VideoCommon::StorageBufferSizeLimit;
     // The following value can be a texture handle, as in Fortune's Weave.
-    CHECK(StorageBufferSizeLimit(4 * mib, 0x10a, false, true, true) == 4 * mib);
-    CHECK(StorageBufferSizeLimit(16 * mib, 0x10a, false, true, false) == 8 * mib);
+    CHECK(StorageBufferSizeLimit(4 * mib, 0x10a, true) == 4 * mib);
+    CHECK(StorageBufferSizeLimit(16 * mib, 0x10a, true) == 8 * mib);
     // NVN and graphics descriptors still use their explicit valid size.
-    CHECK(StorageBufferSizeLimit(4 * mib, 0x10a, false, false, true) == 0x10aU);
-    CHECK(StorageBufferSizeLimit(4 * mib, 0, false, false, false) == 4 * mib);
-    CHECK(StorageBufferSizeLimit(4 * mib, 0x10000010aULL, false, false, false) == 4 * mib);
-    // Indirect read-only pools retain their larger cap; written pools do not.
-    CHECK(StorageBufferSizeLimit(80 * mib, 0x10a, true, true, false) == 64 * mib);
-    CHECK(StorageBufferSizeLimit(80 * mib, 0x10a, true, true, true) == 8 * mib);
+    CHECK(StorageBufferSizeLimit(4 * mib, 0x10a, false) == 0x10aU);
+    CHECK(StorageBufferSizeLimit(4 * mib, 0, false) == 4 * mib);
+    CHECK(StorageBufferSizeLimit(4 * mib, 0x10000010aULL, false) == 4 * mib);
     // Cap before narrowing: a kind range of 4 GiB must not wrap to zero.
     constexpr u64 four_gib = 1ULL << 32;
-    CHECK(StorageBufferSizeLimit(four_gib, 0x10a, false, true, true) == 8 * mib);
-    CHECK(StorageBufferSizeLimit(four_gib + 0x2000, 0x10a, true, true, false) == 64 * mib);
-    CHECK(StorageBufferSizeLimit(0, 0x10a, false, true, false) == 0U);
-    CHECK(StorageBufferSizeLimit(0x1000, 0x10a, false, true, false) == 0x1000U);
+    CHECK(StorageBufferSizeLimit(four_gib, 0x10a, true) == 8 * mib);
+    CHECK(StorageBufferSizeLimit(0, 0x10a, true) == 0U);
+    CHECK(StorageBufferSizeLimit(0x1000, 0x10a, true) == 0x1000U);
 }
 
 TEST_CASE("Native storage mapped prefix joins adjacent virtual segments and stops at gaps",

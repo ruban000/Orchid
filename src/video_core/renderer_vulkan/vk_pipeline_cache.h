@@ -124,7 +124,7 @@ public:
 
     void TickFrame();
 
-    [[nodiscard]] ComputePipeline* CurrentComputePipeline();
+    [[nodiscard]] ComputePipeline* CurrentComputePipeline(std::optional<u64>& diagnostic_key);
 
     void LoadDiskResources(u64 title_id, std::stop_token stop_loading,
                            const VideoCore::DiskResourceLoadCallback& callback);
@@ -229,8 +229,6 @@ private:
     bool use_async_translation{};
     bool use_shader_reuse{};
     size_t num_translation_threads{};
-    bool oot_visual_workaround{};
-    u64 visual_workaround_title{};
 
     GraphicsPipelineCacheKey graphics_key{};
     GraphicsPipeline* current_pipeline{};

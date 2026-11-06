@@ -16,6 +16,7 @@ endif()
 add_library(video_core STATIC
     buffer_cache/buffer_base.h
     buffer_cache/buffer_cache_base.h
+    buffer_cache/sparse_uniform_upload.h
     buffer_cache/storage_buffer_size.h
     buffer_cache/buffer_cache.cpp
     buffer_cache/buffer_cache.h
@@ -29,6 +30,8 @@ add_library(video_core STATIC
     cdma_pusher.h
     compatible_formats.cpp
     compatible_formats.h
+    compute_binding_diagnostic.cpp
+    compute_binding_diagnostic.h
     control/channel_state.cpp
     control/channel_state.h
     control/channel_state_cache.cpp
@@ -159,6 +162,7 @@ add_library(video_core STATIC
     renderer_vulkan/maxwell_to_vk.cpp
     renderer_vulkan/maxwell_to_vk.h
     renderer_vulkan/pipeline_helper.h
+    renderer_vulkan/pipeline_hitch_trace.h
     renderer_vulkan/pipeline_statistics.cpp
     renderer_vulkan/pipeline_statistics.h
     renderer_vulkan/renderer_vulkan.h
@@ -203,6 +207,8 @@ add_library(video_core STATIC
     renderer_vulkan/vk_resource_pool.h
     renderer_vulkan/vk_scheduler.cpp
     renderer_vulkan/vk_scheduler.h
+    renderer_vulkan/vk_hitch_diagnostic.h
+    renderer_vulkan/vk_hitch_diagnostic.h
     renderer_vulkan/vk_shader_reuse.cpp
     renderer_vulkan/vk_shader_reuse.h
     renderer_vulkan/vk_shader_util.cpp
@@ -247,9 +253,13 @@ add_library(video_core STATIC
     shader_cache.h
     shader_environment.cpp
     shader_environment.h
+    native_shader_hitch_trace.h
+    shader_snapshot.h
     shader_handle_program.h
     shader_notify.cpp
     shader_notify.h
+    stall_diagnostics.cpp
+    stall_diagnostics.h
     smaa_area_tex.h
     smaa_search_tex.h
     surface.cpp

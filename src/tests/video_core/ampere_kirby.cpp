@@ -29,7 +29,7 @@ TEST_CASE("Ampere reciprocal accepts the captured uniform source form", "[video_
     const auto predicated = LowerToMaxwell(code);
     REQUIRE(static_cast<bool>(predicated));
     REQUIRE(((predicated.instructions.front() >> 16) & 15) == 1);
-    for (const u32 source : {64U, 0x00000108U}) { // UR64 does not exist; bit 40 is unknown
+    for (const u32 source : {64U, 0x80000008U}) { // UR28-UR62 map to R180-R214
         auto invalid = code;
         invalid[0].words[1] = source;
         REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
@@ -160,9 +160,9 @@ TEST_CASE("Ampere local stores add a register base to the uniform one", "[video_
     REQUIRE(static_cast<bool>(lowered));
     REQUIRE(lowered.instructions.size() >= 2);
     REQUIRE(lowered.instructions[0] ==
-            (0x5c10000000070000ULL | 250ULL | (4ULL << 8) | (221ULL << 20)));
+            (0x5c10000000070000ULL | 252ULL | (4ULL << 8) | (221ULL << 20)));
     REQUIRE(lowered.instructions[1] ==
-            (0xef50000000070000ULL | 6ULL | (250ULL << 8) | (0x20ULL << 20) | (4ULL << 48)));
+            (0xef50000000070000ULL | 6ULL | (252ULL << 8) | (0x20ULL << 20) | (4ULL << 48)));
 }
 
 TEST_CASE("Ampere texture queries place a third output in the second destination",
@@ -232,7 +232,7 @@ TEST_CASE("Ampere warp reductions retain their operation and active-lane mask",
 
 TEST_CASE("Ampere warp reductions reject unsupported modes and uniform destinations",
           "[video_core][ampere]") {
-    for (const u32 mode : {0U, 0x8000U, 0x4200U}) {
+    for (const u32 mode : {0U, 0x8000U, 0x14200U}) {
         const std::array<Instruction, 2> code{{
             {{0x030673c4, 0, mode, 0x000ea200}},
             {{0x0000794d, 0, 0x03800000, 0}},

@@ -411,9 +411,13 @@ void Initialize() {
 void Start() {
 }
 
-void Stop() {
+void Flush() {
     if (logging_instance)
         logging_instance->ForEachBackend([](Backend& backend) { backend.Flush(); });
+}
+
+void Stop() {
+    Flush();
 }
 
 void SetGlobalFilter(const Filter& filter) {

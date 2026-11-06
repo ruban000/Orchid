@@ -136,6 +136,9 @@ void Start();
 /// Explicitly stops the logger thread and flushes the buffers
 void Stop();
 
+/// Flush existing backends without changing the log filter or per-line flushing setting.
+void Flush();
+
 /// The global filter will prevent any messages from even being processed if they are filtered.
 void SetGlobalFilter(const Filter& filter);
 void SetColorConsoleBackendEnabled(bool enabled);

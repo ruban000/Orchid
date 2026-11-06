@@ -55,6 +55,11 @@ public:
 
     void BindInterface(DeviceInterface* device_inter);
 
+    /// Changes after device mappings are updated, including backing installed in sparse holes.
+    [[nodiscard]] u64 MappingGeneration() const noexcept {
+        return translation_generation.load(std::memory_order_acquire);
+    }
+
     /// Marks the memory behind [address, address + size) cold (Common::HostMemory::HintCold),
     /// from a low-priority thread: data the host GPU has its own copy of, e.g. uploaded textures.
     void HintCold(DAddr address, size_t size);

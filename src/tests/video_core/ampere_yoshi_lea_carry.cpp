@@ -90,6 +90,10 @@ void RunLeaIR(const IR::Block& block, std::array<u32, 256>& regs, std::array<boo
             REQUIRE(arg(inst.Arg(1)) < 32);
             result = arg(inst.Arg(0)) << arg(inst.Arg(1));
             break;
+        // The current Maxwell shift translator emits a signed negative-count guard.
+        case O::SLessThan:
+            result = static_cast<s32>(arg(inst.Arg(0))) < static_cast<s32>(arg(inst.Arg(1)));
+            break;
         case O::ULessThan:
             result = arg(inst.Arg(0)) < arg(inst.Arg(1));
             break;

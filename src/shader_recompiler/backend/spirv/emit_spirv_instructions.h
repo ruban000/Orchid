@@ -15,7 +15,6 @@ enum class Attribute : u64;
 enum class Patch : u64;
 class Inst;
 class Value;
-struct Program;
 } // namespace Shader::IR
 
 namespace Shader::Backend::SPIRV {
@@ -641,7 +640,6 @@ Id EmitDPdxCoarse(EmitContext& ctx, Id op_a);
 Id EmitDPdyCoarse(EmitContext& ctx, Id op_a);
 
 // Cooperative matrix (tensor core) operations
-void DefineSoftwareMatrixFunctions(EmitContext& ctx, const IR::Program& program);
 Id EmitTensorMulAdd(EmitContext& ctx, IR::Inst* inst, Id a0, Id a1, Id a2, Id a3, Id b0, Id b1,
                     Id c0, Id c1);
 

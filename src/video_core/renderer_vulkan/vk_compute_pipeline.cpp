@@ -10,8 +10,14 @@
 #include <boost/container/small_vector.hpp>
 #include <fmt/format.h>
 
+#include "common/logging.h"
+#include "common/scope_exit.h"
+#include "common/settings.h"
 #include "shader_recompiler/exception.h"
+#include "video_core/compute_binding_diagnostic.h"
+#include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
+#include "video_core/renderer_vulkan/pipeline_hitch_trace.h"
 #include "video_core/renderer_vulkan/pipeline_statistics.h"
 #include "video_core/renderer_vulkan/vk_buffer_cache.h"
 #include "video_core/renderer_vulkan/vk_compute_pipeline.h"
@@ -21,11 +27,9 @@
 #include "video_core/renderer_vulkan/vk_update_descriptor.h"
 #include "video_core/shader_handle_program.h"
 #include "video_core/shader_notify.h"
+#include "video_core/stall_diagnostics.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
-#include "video_core/gpu_logging/gpu_logging.h"
-#include "common/logging.h"
-#include "common/settings.h"
 
 namespace Vulkan {
 
@@ -91,6 +95,11 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
     }
 
     auto func{[this, shader_notify, pipeline_statistics] {
+        if (hitch_trace_queued_ns != 0) {
+            PipelineHitchTrace::Report(PipelineHitchTrace::Phase::BuildQueue, "compute-build-queue",
+                                       shader_hash, hitch_trace_queued_ns,
+                                       Common::HitchDiagnostic::NowNs());
+        }
         const VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT subgroup_size_ci{
             .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO_EXT,
             .pNext = nullptr,
@@ -128,7 +137,14 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
             .basePipelineIndex = 0,
         };
         try {
+            PipelineHitchTrace::Scope hitch{PipelineHitchTrace::Phase::DriverCreate,
+                                            "compute-driver-create", shader_hash,
+                                            Common::HitchDiagnostic::Enabled()};
+            VideoCommon::StallDiagnostics::Scope diagnostic{
+                {VideoCommon::StallDiagnostics::Phase::ComputeCreate, "compute-build",
+                 shader_hash}};
             pipeline = device.GetLogical().CreateComputePipeline(compute_ci, *pipeline_cache);
+            hitch.Finish();
         } catch (const vk::Exception& exception) {
             LOG_CRITICAL(Render_Vulkan, "Adreno rejected compute shader {:016X}: {}", shader_hash,
                          exception.what());
@@ -162,6 +178,9 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
         }
     }};
     if (thread_worker) {
+        if (Common::HitchDiagnostic::Enabled()) {
+            hitch_trace_queued_ns = Common::HitchDiagnostic::NowNs();
+        }
         thread_worker->QueueWork(std::move(func));
     } else {
         func();
@@ -170,7 +189,30 @@ ComputePipeline::ComputePipeline(const Device& device_, Scheduler& scheduler, vk
 
 bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
                                 Tegra::MemoryManager& gpu_memory, Scheduler& scheduler,
-                                BufferCache& buffer_cache, TextureCache& texture_cache) {
+                                BufferCache& buffer_cache, TextureCache& texture_cache,
+                                std::optional<u64> diagnostic_key) {
+    namespace diag = VideoCommon::ComputeBindingDiagnostic;
+    std::optional<diag::Record> trace;
+    std::optional<diag::Scope> trace_scope;
+    if (diag::Matches(diagnostic_key) && diag::dispatch_limit.Claim()) {
+        const auto& qmd = kepler_compute.launch_description;
+        trace.emplace();
+        trace->phase = diag::Phase::Dispatch;
+        trace->native_key = *diagnostic_key;
+        trace->shader_hash = shader_hash;
+        trace->serial = diag::sequence.fetch_add(1, std::memory_order_relaxed);
+        trace->program = kepler_compute.regs.code_loc.Address() + qmd.program_start;
+        trace->cbuf_enabled = (qmd.const_buffer_enable_mask & 1) != 0;
+        if (trace->cbuf_enabled) {
+            trace->cbuf_base = qmd.const_buffer_config[0].Address();
+            trace->cbuf_size = qmd.const_buffer_config[0].size;
+        }
+        trace_scope.emplace(*trace);
+    }
+    SCOPE_EXIT {
+        if (trace_scope)
+            diag::Emit(*trace);
+    };
     guest_descriptor_queue.Acquire(scheduler, num_descriptor_entries, uses_descriptor_buffer);
 
     buffer_cache.SetComputeUniformBufferState(info.constant_buffer_mask, &uniform_buffer_sizes);
@@ -179,7 +221,7 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     for (const auto& desc : info.storage_buffers_descriptors) {
         ASSERT(desc.count == 1);
         buffer_cache.BindComputeStorageBuffer(ssbo_index, desc.cbuf_index, desc.cbuf_offset,
-                                              desc.is_written, desc.indirect_offset);
+                                              desc.is_written);
         ++ssbo_index;
     }
 
@@ -294,6 +336,12 @@ bool ComputePipeline::Configure(Tegra::Engines::KeplerCompute& kepler_compute,
     if (!is_built.load(std::memory_order::relaxed)) {
         // Wait for the pipeline to be built
         scheduler.Record([this](vk::CommandBuffer) {
+            PipelineHitchTrace::Scope hitch{PipelineHitchTrace::Phase::FirstUseWait,
+                                            "compute-first-use-wait", shader_hash,
+                                            Common::HitchDiagnostic::Enabled()};
+            VideoCommon::StallDiagnostics::Scope diagnostic{
+                {VideoCommon::StallDiagnostics::Phase::PipelineBuildWait, "scheduler-worker",
+                 shader_hash}};
             std::unique_lock lock{build_mutex};
             build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });
         });

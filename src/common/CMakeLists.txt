@@ -71,6 +71,7 @@ add_library(
     host_memory.h
     input.h
     intrusive_red_black_tree.h
+    hitch_diagnostic.h
     literals.h
     logging.cpp
     logging.h

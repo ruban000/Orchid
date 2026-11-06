@@ -940,8 +940,9 @@ boost::container::small_vector<BufferImageCopy, 16> UnswizzleBlockLinearImage(
 }
 
 boost::container::small_vector<BufferImageCopy, 16> UnswizzleImageRows(
-    Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const ImageInfo& info,
-    std::span<const std::pair<u64, u64>> dirty_ranges, std::vector<u8>& output) {
+    const std::function<void(GPUVAddr, std::span<u8>)>& read, GPUVAddr gpu_addr,
+    const ImageInfo& info, std::span<const std::pair<u64, u64>> dirty_ranges,
+    const std::function<std::span<u8>(size_t)>& allocate, bool native_tiling) {
     boost::container::small_vector<BufferImageCopy, 16> copies;
     if (info.type != ImageType::e2D || info.size.depth != 1 || info.block.depth != 0 ||
         info.num_samples != 1 || dirty_ranges.empty()) {
@@ -959,7 +960,17 @@ boost::container::small_vector<BufferImageCopy, 16> UnswizzleImageRows(
     // spacing only pads the end of each block row.
     const u32 gob_tiles = 1U << (GOB_SIZE_X_SHIFT - bpp_log2);
     const u32 run_alignment = GOB_SIZE_X_SHIFT - bpp_log2;
-    std::vector<u8> run;
+    struct Run {
+        u64 guest_offset;
+        size_t guest_bytes;
+        u32 tiles;
+        u32 rows;
+        u32 block_height;
+    };
+    // Plan the complete upload before allocating GPU staging memory. This also ensures an
+    // unsupported later mip cannot leave the caller with a partially uploaded image.
+    std::vector<Run> runs;
+    size_t output_bytes = 0;
     std::vector<bool> dirty_blocks;
     u32 level_offset = 0;
     for (s32 level = 0; level < num_levels; ++level) {
@@ -1010,7 +1021,8 @@ boost::container::small_vector<BufferImageCopy, 16> UnswizzleImageRows(
                         continue;
                     }
                     u32 last = first;
-                    while (last < blocks_per_band && dirty_blocks[size_t{band} * blocks_per_band + last]) {
+                    while (last < blocks_per_band &&
+                           dirty_blocks[size_t{band} * blocks_per_band + last]) {
                         ++last;
                     }
                     const u32 first_tile = first * gob_tiles;
@@ -1020,17 +1032,12 @@ boost::container::small_vector<BufferImageCopy, 16> UnswizzleImageRows(
                     // A run of consecutive blocks is laid out like an image that many GOBs wide.
                     const u32 run_tiles = (last - first) * gob_tiles;
                     const size_t guest_bytes = size_t{last - first} * block_bytes;
-                    run.resize(guest_bytes);
-                    gpu_memory.ReadBlockUnsafe(gpu_addr + segment_begin + u64{band} * band_bytes +
-                                                   u64{first} * block_bytes,
-                                               run.data(), guest_bytes);
-                    const size_t host_offset = output.size();
+                    const size_t host_offset = output_bytes;
                     const size_t host_bytes = (size_t{tile_rows} * run_tiles) << bpp_log2;
-                    output.resize(host_offset + host_bytes);
-                    Tegra::Texture::UnswizzleTexture(std::span<u8>{output}.subspan(host_offset, host_bytes),
-                                                     run, 1U << bpp_log2, run_tiles, tile_rows, 1,
-                                                     block.height, block.depth, run_alignment,
-                                                     gpu_memory.UsesNativeTiling());
+                    output_bytes += host_bytes;
+                    runs.push_back(
+                        {segment_begin + u64{band} * band_bytes + u64{first} * block_bytes,
+                         guest_bytes, run_tiles, tile_rows, block.height});
                     const u32 x = first_tile * tile_size.width;
                     const u32 y = first_row * tile_size.height;
                     copies.push_back(BufferImageCopy{
@@ -1045,8 +1052,9 @@ boost::container::small_vector<BufferImageCopy, 16> UnswizzleImageRows(
                                 .num_layers = 1,
                             },
                         .image_offset = {static_cast<s32>(x), static_cast<s32>(y), 0},
-                        .image_extent = {std::min(run_tiles * tile_size.width, level_size.width - x),
-                                         std::min(tile_rows * tile_size.height, level_size.height - y), 1},
+                        .image_extent =
+                            {std::min(run_tiles * tile_size.width, level_size.width - x),
+                             std::min(tile_rows * tile_size.height, level_size.height - y), 1},
                     });
                     first = last;
                 }
@@ -1054,7 +1062,36 @@ boost::container::small_vector<BufferImageCopy, 16> UnswizzleImageRows(
         }
         level_offset += level_sizes[level];
     }
+    if (copies.empty()) {
+        return {};
+    }
+    const auto output = allocate(output_bytes);
+    if (output.size() < output_bytes) {
+        return {};
+    }
+    Common::ScratchBuffer<u8> input;
+    for (size_t index = 0; index < runs.size(); ++index) {
+        const auto& run = runs[index];
+        const auto& copy = copies[index];
+        input.resize_destructive(run.guest_bytes);
+        read(gpu_addr + run.guest_offset, std::span<u8>{input.data(), run.guest_bytes});
+        Tegra::Texture::UnswizzleTexture(output.subspan(copy.buffer_offset, copy.buffer_size),
+                                         std::span<const u8>{input.data(), run.guest_bytes},
+                                         1U << bpp_log2, run.tiles, run.rows, 1, run.block_height,
+                                         0, run_alignment, native_tiling);
+    }
     return copies;
+}
+
+boost::container::small_vector<BufferImageCopy, 16> UnswizzleImageRows(
+    Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const ImageInfo& info,
+    std::span<const std::pair<u64, u64>> dirty_ranges,
+    const std::function<std::span<u8>(size_t)>& allocate) {
+    return UnswizzleImageRows(
+        [&](GPUVAddr address, std::span<u8> bytes) {
+            gpu_memory.ReadBlockUnsafe(address, bytes.data(), bytes.size());
+        },
+        gpu_addr, info, dirty_ranges, allocate, gpu_memory.UsesNativeTiling());
 }
 
 namespace {

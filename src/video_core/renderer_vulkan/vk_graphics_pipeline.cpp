@@ -14,6 +14,8 @@
 #include <fmt/format.h>
 
 #include "video_core/renderer_vulkan/pipeline_helper.h"
+#include "video_core/renderer_vulkan/pipeline_hitch_trace.h"
+#include "video_core/stall_diagnostics.h"
 
 #include "common/bit_field.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
@@ -325,6 +327,11 @@ GraphicsPipeline::GraphicsPipeline(
     }
 
     auto func{[this, shader_notify, &render_pass_cache, pipeline_statistics] {
+        if (hitch_trace_queued_ns != 0) {
+            PipelineHitchTrace::Report(PipelineHitchTrace::Phase::BuildQueue,
+                                       "graphics-build-queue", key.Hash(), hitch_trace_queued_ns,
+                                       Common::HitchDiagnostic::NowNs());
+        }
         const VkRenderPass render_pass{render_pass_cache.Get(MakeRenderPassKey(key.state, device))};
         Validate();
         try {
@@ -362,6 +369,9 @@ GraphicsPipeline::GraphicsPipeline(
     // Before the build: it frees the modules this looks at.
     configure_func = ConfigureFunc(*spv_modules, stage_infos);
     if (worker_thread) {
+        if (Common::HitchDiagnostic::Enabled()) {
+            hitch_trace_queued_ns = Common::HitchDiagnostic::NowNs();
+        }
         worker_thread->QueueWork(std::move(func));
     } else {
         func();
@@ -398,8 +408,7 @@ bool GraphicsPipeline::ConfigureImpl(bool is_indexed) {
             for (const auto& desc : info.storage_buffers_descriptors) {
                 ASSERT(desc.count == 1);
                 buffer_cache.BindGraphicsStorageBuffer(stage, ssbo_index, desc.cbuf_index,
-                                                       desc.cbuf_offset, desc.is_written,
-                                                       desc.indirect_offset);
+                                                       desc.cbuf_offset, desc.is_written);
                 ++ssbo_index;
             }
         }
@@ -669,6 +678,13 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
     if (!is_built.load(std::memory_order::relaxed)) {
         // Wait for the pipeline to be built
         scheduler.Record([this](vk::CommandBuffer) {
+            const bool trace = Common::HitchDiagnostic::Enabled();
+            PipelineHitchTrace::Scope hitch{PipelineHitchTrace::Phase::FirstUseWait,
+                                            "graphics-first-use-wait", trace ? key.Hash() : 0,
+                                            trace};
+            VideoCommon::StallDiagnostics::Scope diagnostic{
+                {VideoCommon::StallDiagnostics::Phase::PipelineBuildWait, "scheduler-worker",
+                 key.Hash()}};
             std::unique_lock lock{build_mutex};
             build_condvar.wait(lock, [this] { return is_built.load(std::memory_order::relaxed); });
         });
@@ -1170,7 +1186,7 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         flags |= VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
     }
 
-    pipeline = device.GetLogical().CreateGraphicsPipeline({
+    const VkGraphicsPipelineCreateInfo graphics_ci{
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .pNext = nullptr,
         .flags = flags,
@@ -1190,7 +1206,14 @@ void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
         .subpass = 0,
         .basePipelineHandle = nullptr,
         .basePipelineIndex = 0,
-    }, *pipeline_cache);
+    };
+    const bool trace = Common::HitchDiagnostic::Enabled();
+    PipelineHitchTrace::Scope hitch{PipelineHitchTrace::Phase::DriverCreate,
+                                    "graphics-driver-create", trace ? key.Hash() : 0, trace};
+    VideoCommon::StallDiagnostics::Scope diagnostic{
+        {VideoCommon::StallDiagnostics::Phase::GraphicsCreate, "graphics-build", key.Hash()}};
+    pipeline = device.GetLogical().CreateGraphicsPipeline(graphics_ci, *pipeline_cache);
+    hitch.Finish();
 
     // Log graphics pipeline creation
     if (GPU::Logging::IsActive()) {

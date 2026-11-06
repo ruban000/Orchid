@@ -3716,21 +3716,22 @@ bool TextureCache<P>::UploadInChunks(Image& image) {
         MapSizeBytes(image) < min_size) {
         return false;
     }
-    std::vector<u8> data;
     for (u64 offset = 0; offset < image.guest_size_bytes; offset += chunk_size) {
         const std::array range{
             std::pair<u64, u64>{offset, std::min<u64>(offset + chunk_size, image.guest_size_bytes)}};
-        data.clear();
-        const auto copies = UnswizzleImageRows(*gpu_memory, image.gpu_addr, image.info, range, data);
+        std::optional<decltype(runtime.UploadStagingBuffer(size_t{}))> staging;
+        const auto copies = UnswizzleImageRows(
+            *gpu_memory, image.gpu_addr, image.info, range, [&](size_t bytes) {
+                staging.emplace(runtime.UploadStagingBuffer(bytes));
+                return staging->mapped_span;
+            });
         if (copies.empty()) {
             if (offset == 0) {
                 return false; // layout not handled: one staging buffer after all
             }
             continue; // padding between levels or layers
         }
-        auto staging = runtime.UploadStagingBuffer(data.size());
-        std::memcpy(staging.mapped_span.data(), data.data(), data.size());
-        image.UploadMemory(staging, copies);
+        image.UploadMemory(*staging, copies);
     }
     runtime.InsertUploadMemoryBarrier();
     return true;
@@ -3826,14 +3827,16 @@ bool TextureCache<P>::RefreshPartialContents(Image& image) {
         }
         ranges = std::move(merged);
     }
-    std::vector<u8> data;
-    auto copies = UnswizzleImageRows(*gpu_memory, image.gpu_addr, image.info, ranges, data);
+    std::optional<decltype(runtime.UploadStagingBuffer(size_t{}))> staging;
+    const auto copies = UnswizzleImageRows(
+        *gpu_memory, image.gpu_addr, image.info, ranges, [&](size_t bytes) {
+            staging.emplace(runtime.UploadStagingBuffer(bytes));
+            return staging->mapped_span;
+        });
     if (copies.empty()) {
         return false;
     }
-    auto staging = runtime.UploadStagingBuffer(data.size());
-    std::memcpy(staging.mapped_span.data(), data.data(), data.size());
-    image.UploadMemory(staging, copies);
+    image.UploadMemory(*staging, copies);
     runtime.InsertUploadMemoryBarrier();
     return true;
 }

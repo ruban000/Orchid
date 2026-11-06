@@ -38,6 +38,11 @@ public:
         return gpu_tick.load(std::memory_order_acquire);
     }
 
+    /// Diagnostic only: unlike CurrentTick(), advanced after the driver accepted a submission.
+    [[nodiscard]] u64 DiagnosticSubmittedTick() const noexcept {
+        return diagnostic_submitted_tick.load(std::memory_order_acquire);
+    }
+
     /// Returns true when a tick has been hit by the GPU.
     [[nodiscard]] bool IsFree(u64 tick) const noexcept {
         return KnownGpuTick() >= tick;
@@ -74,6 +79,7 @@ private:
     const Device& device;             ///< Device.
     vk::Semaphore semaphore;          ///< Timeline semaphore.
     std::atomic<u64> gpu_tick{0};     ///< Current known GPU tick.
+    std::atomic<u64> diagnostic_submitted_tick{0}; // Last successful submit, diagnostic only.
     std::atomic<u64> current_tick{1}; ///< Current logical tick.
     std::mutex wait_mutex;
     std::mutex free_mutex;

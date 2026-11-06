@@ -2,15 +2,55 @@
 
 #pragma once
 
+#include <optional>
+#include <string_view>
+
 #include "common/settings.h"
 
 namespace Settings {
+
+enum class GamePresetQuality { Low, Standard, High };
+
+inline constexpr std::string_view GamePresetQualityToken(GamePresetQuality quality) {
+    switch (quality) {
+    case GamePresetQuality::Low:
+        return "low";
+    case GamePresetQuality::High:
+        return "high";
+    default:
+        return "standard";
+    }
+}
+
+inline constexpr std::optional<GamePresetQuality> ParseGamePresetQuality(std::string_view token) {
+    if (token == "low")
+        return GamePresetQuality::Low;
+    if (token == "standard")
+        return GamePresetQuality::Standard;
+    if (token == "high")
+        return GamePresetQuality::High;
+    return std::nullopt;
+}
+
+// Legacy headless answers retain their meaning; quality tokens also bypass the dialog.
+// Environment answers apply to this boot only and never become a saved UI preference.
+inline constexpr std::optional<GamePresetQuality> GamePresetEnvironmentQuality(
+    std::string_view value) {
+    return value == "1" ? std::optional{GamePresetQuality::Standard}
+                        : ParseGamePresetQuality(value);
+}
 
 inline constexpr u64 MarioKartWorldProgramId = 0x0400C3F00006E000ULL;
 inline constexpr u64 DonkeyKongBananzaProgramId = 0x040074A01BF12000ULL;
 inline constexpr u64 HyruleWarriorsAgeOfImprisonmentProgramId = 0x04003F40232DE000ULL;
 inline constexpr u64 MarioTennisFeverProgramId = 0x0400D4201C6EA000ULL;
-inline constexpr u64 OcarinaOfTimeProgramId = 0x0400486024DEC000ULL;
+// Confirmed from the local programs' NUP/NPDM metadata, including the full Yoshi release.
+inline constexpr u64 KirbyAirRidersProgramId = 0x040077201BE50000ULL;
+inline constexpr u64 PokemonPokopiaProgramId = 0x0400A3A01EE4C000ULL;
+inline constexpr u64 StarFoxProgramId = 0x0400E88025B1A000ULL;
+inline constexpr u64 YoshiMysteriousBookProgramId = 0x0400245021D2C000ULL;
+inline constexpr u64 SuperMarioBrosWonderProgramId = 0x010015100B514000ULL;
+inline constexpr u64 KirbyForgottenLandProgramId = 0x01004D300C5AE000ULL;
 
 namespace Detail {
 inline auto SessionSetter(bool global) {
@@ -20,27 +60,27 @@ inline auto SessionSetter(bool global) {
     };
 }
 
-/// What every Switch 2 preset shares: 1x keeps the comparison with the console fair, the rest
-/// trades nothing visible for speed.
-inline void SetSwitch2BaseSettings(Values& settings, bool global) {
+/// Shared graphics baseline. Do not impose native GPU synchronization or clock settings here:
+/// Programs with the Switch 1 layout retain those preferences.
+inline void SetGraphicsBaseSettings(Values& settings, bool global) {
     const auto session = SessionSetter(global);
     session(settings.renderer_backend, RendererBackend::Vulkan);
     session(settings.resolution_setup, ResolutionSetup::Res1X);
-    session(settings.gpu_accuracy, GpuAccuracy::Low);
     session(settings.use_asynchronous_shaders, true);
     session(settings.astc_recompression, AstcRecompression::Bc3);
     session(settings.vram_usage_mode, VramUsageMode::Conservative);
-    session(settings.use_reactive_flushing, false);
     session(settings.vsync_mode, VSyncMode::FifoRelaxed);
     session(settings.scaling_filter, ScalingFilter::ScaleForce);
     session(settings.anti_aliasing, AntiAliasing::Fxaa);
 }
-} // namespace Detail
 
-inline void SetMarioKartWorldRecommendedSettings(Values& settings, bool global) {
-    Detail::SetSwitch2BaseSettings(settings, global);
-    Detail::SessionSetter(global)(settings.use_docked_mode, ConsoleMode::Handheld);
+inline void SetSwitch2BaseSettings(Values& settings, bool global) {
+    SetGraphicsBaseSettings(settings, global);
+    const auto session = SessionSetter(global);
+    session(settings.gpu_accuracy, GpuAccuracy::Low);
+    session(settings.use_reactive_flushing, false);
 }
+} // namespace Detail
 
 inline void SetDonkeyKongBananzaRecommendedSettings(Values& settings, bool global) {
     Detail::SetSwitch2BaseSettings(settings, global);
@@ -66,47 +106,23 @@ inline void SetMarioTennisFeverRecommendedSettings(Values& settings, bool global
     session(settings.async_presentation, true);
 }
 
-inline void SetOcarinaOfTimeRecommendedSettings(Values& settings, bool global) {
-    Detail::SetSwitch2BaseSettings(settings, global);
-    const auto session = Detail::SessionSetter(global);
-    // Leon's playtest: 24-25 ms median frame time with reactive flushing, 36 ms without.
-    session(settings.use_reactive_flushing, true);
-    session(settings.fps30_patch, true);
-}
-
 struct GamePreset {
     u64 program_id;
     const char* name;
-    /// The settings in the boot prompt's words.
-    const char* summary;
     void (*apply)(Values& settings, bool global);
 };
 
 inline constexpr GamePreset GamePresets[] = {
-    {MarioKartWorldProgramId, "Mario Kart World",
-     "Vulkan, 1x resolution, GPU Fast, asynchronous shaders, BC3, conservative VRAM, reactive "
-     "flushing off, FIFO Relaxed VSync, handheld mode, ScaleForce, and FXAA.",
-     SetMarioKartWorldRecommendedSettings},
-    {DonkeyKongBananzaProgramId, "Donkey Kong Bananza",
-     "Vulkan, 1x resolution, GPU Fast, asynchronous shaders, BC3, conservative VRAM, reactive "
-     "flushing off, FIFO Relaxed VSync, ScaleForce, FXAA, the Boost GPU clock and the 30 FPS "
-     "lock.",
-     SetDonkeyKongBananzaRecommendedSettings},
+    {MarioTennisFeverProgramId, "Mario Tennis Fever", SetMarioTennisFeverRecommendedSettings},
+    {DonkeyKongBananzaProgramId, "Donkey Kong Bananza", SetDonkeyKongBananzaRecommendedSettings},
     {HyruleWarriorsAgeOfImprisonmentProgramId, "Hyrule Warriors: Age of Imprisonment",
-     "Vulkan, 1x resolution, GPU Fast, asynchronous shaders, BC3, conservative VRAM, reactive "
-     "flushing off, FIFO Relaxed VSync, ScaleForce, FXAA, the Normal CPU clock and Balanced GPU "
-     "fences.",
      SetHyruleWarriorsRecommendedSettings},
-    {MarioTennisFeverProgramId, "Mario Tennis Fever",
-     "Vulkan, 1x resolution, GPU Fast, asynchronous shaders, BC3, conservative VRAM, reactive "
-     "flushing off, FIFO Relaxed VSync, ScaleForce, FXAA, Balanced GPU fences and asynchronous "
-     "presentation.",
-     SetMarioTennisFeverRecommendedSettings},
-    {OcarinaOfTimeProgramId, "The Legend of Zelda: Ocarina of Time",
-     "Vulkan, 1x resolution, GPU Fast, asynchronous shaders, BC3, conservative VRAM, reactive "
-     "flushing on, FIFO Relaxed VSync, ScaleForce, FXAA and the built-in 30 FPS game patch "
-     "(supported game builds only).",
-     SetOcarinaOfTimeRecommendedSettings},
+    {KirbyAirRidersProgramId, "Kirby Air Riders", Detail::SetSwitch2BaseSettings},
+    {PokemonPokopiaProgramId, "Pokemon Pokopia", Detail::SetSwitch2BaseSettings},
+    {StarFoxProgramId, "Star Fox", Detail::SetSwitch2BaseSettings},
+    {YoshiMysteriousBookProgramId, "Yoshi and the Mysterious Book", Detail::SetSwitch2BaseSettings},
+    {SuperMarioBrosWonderProgramId, "Super Mario Bros. Wonder", Detail::SetGraphicsBaseSettings},
+    {KirbyForgottenLandProgramId, "Kirby and the Forgotten Land", Detail::SetGraphicsBaseSettings},
 };
 
 /// The title's preset, or nullptr when it has none.
@@ -119,15 +135,40 @@ inline const GamePreset* FindGamePreset(u64 program_id) {
     return nullptr;
 }
 
-/// Applies the title's preset as per-game values for this session (RestoreGlobalState drops them
-/// when emulation stops). False when it was declined or the title has none.
-inline bool ApplyGamePreset(Values& settings, u64 program_id, bool accepted) {
+/// Applies the title's compatibility settings and visual quality for this session. Global and
+/// saved per-game values remain intact; RestoreGlobalState drops these overrides on stop.
+inline bool ApplyGamePreset(Values& settings, u64 program_id, GamePresetQuality quality) {
     const GamePreset* const preset = FindGamePreset(program_id);
-    if (!accepted || preset == nullptr) {
+    if (preset == nullptr) {
         return false;
     }
     preset->apply(settings, false);
+    const auto session = Detail::SessionSetter(false);
+    switch (quality) {
+    case GamePresetQuality::Low:
+        session(settings.resolution_setup, ResolutionSetup::Res3_4X);
+        session(settings.anti_aliasing, AntiAliasing::Fxaa);
+        session(settings.astc_recompression, AstcRecompression::Bc3);
+        session(settings.max_anisotropy, AnisotropyMode::X2);
+        break;
+    case GamePresetQuality::High:
+        session(settings.resolution_setup, ResolutionSetup::Res2X);
+        session(settings.anti_aliasing, AntiAliasing::Smaa);
+        session(settings.astc_recompression, AstcRecompression::Uncompressed);
+        session(settings.max_anisotropy, AnisotropyMode::X16);
+        break;
+    default:
+        session(settings.resolution_setup, ResolutionSetup::Res1X);
+        session(settings.anti_aliasing, AntiAliasing::Fxaa);
+        session(settings.astc_recompression, AstcRecompression::Bc3);
+        session(settings.max_anisotropy, AnisotropyMode::X4);
+        break;
+    }
     return true;
+}
+
+inline bool ApplyGamePreset(Values& settings, u64 program_id, bool accepted) {
+    return accepted && ApplyGamePreset(settings, program_id, GamePresetQuality::Standard);
 }
 
 } // namespace Settings

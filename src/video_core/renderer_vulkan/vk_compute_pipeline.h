@@ -9,6 +9,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <optional>
 
 #include "common/common_types.h"
 #include "common/thread_worker.h"
@@ -50,7 +51,8 @@ public:
 
     [[nodiscard]] bool Configure(Tegra::Engines::KeplerCompute& kepler_compute,
                                  Tegra::MemoryManager& gpu_memory, Scheduler& scheduler,
-                                 BufferCache& buffer_cache, TextureCache& texture_cache);
+                                 BufferCache& buffer_cache, TextureCache& texture_cache,
+                                 std::optional<u64> diagnostic_key);
 
     bool IsBound() const noexcept {
         return static_cast<bool>(pipeline);
@@ -63,6 +65,7 @@ private:
     DescriptorBufferRing& descriptor_buffer_ring;
     Shader::Info info;
     u64 shader_hash{};
+    s64 hitch_trace_queued_ns{};
     u32 num_descriptor_entries{};
 
     VideoCommon::ComputeUniformBufferSizes uniform_buffer_sizes{};

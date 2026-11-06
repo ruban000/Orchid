@@ -79,11 +79,18 @@ struct OverlapResult {
     const ImageInfo& info, std::span<const u8> input, std::span<u8> output, bool native_tiling);
 
 /// Unswizzles only the blocks of a 2D block-linear image that overlap `dirty_ranges` (sorted,
-/// non-overlapping [begin, end) byte offsets from the image start) into `output`. Returns no copies
-/// when the image layout is not one this handles; the caller then uploads the whole image.
+/// non-overlapping [begin, end) byte offsets from the image start). Calls `allocate` once with the
+/// complete linear size, then decodes directly into that storage. Unsupported/empty layouts return
+/// no copies without allocating or reading; the caller can then upload the whole image.
 [[nodiscard]] boost::container::small_vector<BufferImageCopy, 16> UnswizzleImageRows(
     Tegra::MemoryManager& gpu_memory, GPUVAddr gpu_addr, const ImageInfo& info,
-    std::span<const std::pair<u64, u64>> dirty_ranges, std::vector<u8>& output);
+    std::span<const std::pair<u64, u64>> dirty_ranges,
+    const std::function<std::span<u8>(size_t)>& allocate);
+
+[[nodiscard]] boost::container::small_vector<BufferImageCopy, 16> UnswizzleImageRows(
+    const std::function<void(GPUVAddr, std::span<u8>)>& read, GPUVAddr gpu_addr,
+    const ImageInfo& info, std::span<const std::pair<u64, u64>> dirty_ranges,
+    const std::function<std::span<u8>(size_t)>& allocate, bool native_tiling);
 
 /// Rewrites `copies` (from UnswizzleImage) to the layout ConvertImage produces, without converting.
 void ConvertedLayout(const ImageInfo& info, std::span<BufferImageCopy> copies);

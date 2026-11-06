@@ -18,6 +18,7 @@
 #include "common/fs/path_util.h"
 #include "common/settings.h"
 #include "core/perf_stats.h"
+#include "core/frame_telemetry.h"
 
 using namespace std::chrono_literals;
 using DoubleSecs = std::chrono::duration<double, std::chrono::seconds::period>;
@@ -30,9 +31,12 @@ constexpr std::size_t IgnoreFrames = 5;
 
 namespace Core {
 
-PerfStats::PerfStats(u64 title_id_) : title_id(title_id_) {}
+PerfStats::PerfStats(u64 title_id_)
+    : title_id(title_id_), frame_telemetry(FrameTelemetry::FromEnvironment(title_id_)) {}
 
 PerfStats::~PerfStats() {
+    // Finalize the optional stream independently of legacy CSV settings/history length.
+    frame_telemetry.reset();
     if (!Settings::values.record_frame_times || title_id == 0) {
         return;
     }
@@ -72,6 +76,9 @@ void PerfStats::EndSystemFrame() {
 
     auto frame_end = Clock::now();
     const auto frame_time = frame_end - frame_begin;
+    if (frame_telemetry) {
+        frame_telemetry->Record(frame_begin, frame_end);
+    }
     if (current_index < perf_history.size()) {
         perf_history[current_index++] =
             std::chrono::duration<double, std::milli>(frame_time).count();

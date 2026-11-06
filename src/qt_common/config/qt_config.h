@@ -19,6 +19,9 @@ public:
     void ReloadAllValues() override;
     void SaveAllValues() override;
 
+    /// Persist only the boot-preset choice, without saving/reloading active game/input settings.
+    void SaveGamePresetQualities();
+
     void ReadQtControlPlayerValues(std::size_t player_index);
     void SaveQtControlPlayerValues(std::size_t player_index);
 
@@ -31,6 +34,7 @@ protected:
     void ReadPathValues() override;
     void ReadShortcutValues() override;
     void ReadUIValues() override;
+    void ReadGamePresetQualities();
     void ReadUIGamelistValues() override;
     void ReadUILayoutValues() override;
     void ReadMultiplayerValues() override;
@@ -43,6 +47,7 @@ protected:
     void SavePathValues() override;
     void SaveShortcutValues() override;
     void SaveUIValues() override;
+    void WriteGamePresetQualities();
     void SaveUIGamelistValues() override;
     void SaveUILayoutValues() override;
     void SaveMultiplayerValues() override;

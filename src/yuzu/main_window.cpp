@@ -74,6 +74,11 @@
 #include <QActionGroup>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QLabel>
+#include <QVBoxLayout>
 #include <QDesktopServices>
 #include <QDir>
 #include <QElapsedTimer>
@@ -1950,6 +1955,17 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
     config->SaveAllValues();
 
     u64 title_id{0};
+    bool boot_settings_loaded = false;
+    SCOPE_EXIT {
+        // A cancelled preset/user dialog or a failed boot must not leak session values or the
+        // loaded per-game input selection into the next title.
+        if (boot_settings_loaded && !emulation_running && !QtCommon::system->IsPoweredOn()) {
+            Settings::RestoreGlobalState(false);
+            QtCommon::system->HIDCore().ReloadInputDevices();
+            QtCommon::system->ApplySettings();
+            Settings::UpdateGPUAccuracy();
+        }
+    };
 
     last_filename_booted = filename;
 
@@ -1967,33 +1983,110 @@ void MainWindow::BootGame(const QString& filename, Service::AM::FrontendAppletPa
                                           ? Common::FS::PathToUTF8String(file_path.filename())
                                           : fmt::format("{:016X}", title_id);
         QtConfig per_game_config(config_file_name, Config::ConfigType::PerGameConfig);
+        boot_settings_loaded = true;
         QtCommon::system->HIDCore().ReloadInputDevices();
         QtCommon::system->ApplySettings();
     }
 
     if (const Settings::GamePreset* preset = Settings::FindGamePreset(title_id);
-        preset != nullptr && !recommended_settings_answers.contains(title_id)) {
-        const QString name = QString::fromUtf8(preset->name);
-        // EDEN_RECOMMENDED_SETTINGS=0|1 answers without the dialog (headless test harness).
-        const QByteArray preset_answer = qgetenv("EDEN_RECOMMENDED_SETTINGS");
-        const bool accepted =
-            !preset_answer.isEmpty() ? preset_answer == "1" :
-            QMessageBox::question(
-                this, tr("Recommended %1 settings").arg(name),
-                tr("Use the recommended settings for %1?\n\n%2\n\n"
-                   "They apply to %1 until Orchid is closed. Your saved settings are not "
-                   "changed.")
-                    .arg(name, QString::fromUtf8(preset->summary)),
-                QMessageBox::Yes | QMessageBox::No, QMessageBox::No) == QMessageBox::Yes;
-        recommended_settings_answers[title_id] = accepted;
-        LOG_INFO(Config, "{} recommended settings accepted: {}", preset->name, accepted);
-    }
-    if (const auto answer = recommended_settings_answers.find(title_id);
-        answer != recommended_settings_answers.end() &&
-        Settings::ApplyGamePreset(Settings::values, title_id, answer->second)) {
-        QtCommon::system->ApplySettings();
-        Settings::UpdateGPUAccuracy();
-        LOG_INFO(Config, "Applied recommended settings after per-game configuration");
+        preset != nullptr) {
+        using Quality = Settings::GamePresetQuality;
+        std::optional<Quality> selected;
+        const QByteArray preset_override = qgetenv("EDEN_RECOMMENDED_SETTINGS");
+        if (!preset_override.isEmpty()) {
+            selected = Settings::GamePresetEnvironmentQuality(preset_override.toStdString());
+        } else {
+            QDialog dialog(this);
+            dialog.setObjectName(QStringLiteral("gamePresetDialog"));
+            dialog.setWindowTitle(tr("Start %1").arg(QString::fromUtf8(preset->name)));
+            dialog.setMinimumWidth(440);
+            auto* layout = new QVBoxLayout(&dialog);
+            auto* label = new QLabel(tr("Graphics preset"), &dialog);
+            auto* quality = new QComboBox(&dialog);
+            quality->setObjectName(QStringLiteral("gamePresetQuality"));
+            quality->addItem(tr("Low"), static_cast<int>(Quality::Low));
+            quality->addItem(tr("Standard (recommended)"), static_cast<int>(Quality::Standard));
+            quality->addItem(tr("High"), static_cast<int>(Quality::High));
+            label->setBuddy(quality);
+            const Quality remembered =
+                UISettings::values.game_preset_qualities.value(title_id, Quality::Standard);
+            const int remembered_index = quality->findData(static_cast<int>(remembered));
+            quality->setCurrentIndex(remembered_index < 0 ? 1 : remembered_index);
+            auto* summary = new QLabel(&dialog);
+            summary->setObjectName(QStringLiteral("gamePresetSummary"));
+            summary->setWordWrap(true);
+            summary->setMinimumHeight(76);
+            const auto update_summary = [&] {
+                switch (static_cast<Quality>(quality->currentData().toInt())) {
+                case Quality::Low:
+                    summary->setText(
+                        tr("0.75× resolution · FXAA · BC3 textures · 2× anisotropic filtering\n"
+                           "Lower GPU load with a softer image."));
+                    break;
+                case Quality::High:
+                    summary->setText(tr(
+                        "2× resolution · SMAA · Uncompressed textures · 16× anisotropic filtering\n"
+                        "Sharper image with higher GPU and graphics memory use."));
+                    break;
+                default:
+                    summary->setText(
+                        tr("1× resolution · FXAA · BC3 textures · 4× anisotropic filtering\n"
+                           "A balance of image quality and performance."));
+                    break;
+                }
+            };
+            connect(quality, &QComboBox::currentIndexChanged, &dialog, update_summary);
+            update_summary();
+            auto* compatibility = new QLabel(
+                preset->program_id == Settings::DonkeyKongBananzaProgramId
+                    ? tr("Game compatibility settings and the 30 FPS lock stay enabled in every "
+                         "preset.")
+                : preset->program_id == Settings::MarioTennisFeverProgramId ||
+                        preset->program_id == Settings::HyruleWarriorsAgeOfImprisonmentProgramId
+                    ? tr("Recommended game compatibility settings stay enabled in every preset.")
+                    : tr("Settings apply for this launch. Your saved graphics settings stay "
+                         "unchanged."),
+                &dialog);
+            compatibility->setObjectName(QStringLiteral("gamePresetCompatibility"));
+            compatibility->setWordWrap(true);
+            auto* buttons = new QDialogButtonBox(&dialog);
+            auto* start = buttons->addButton(tr("Start"), QDialogButtonBox::AcceptRole);
+            start->setObjectName(QStringLiteral("gamePresetStart"));
+            start->setDefault(true);
+            auto* current =
+                buttons->addButton(tr("Use current settings"), QDialogButtonBox::ActionRole);
+            current->setObjectName(QStringLiteral("gamePresetCurrent"));
+            auto* cancel = buttons->addButton(QDialogButtonBox::Cancel);
+            cancel->setObjectName(QStringLiteral("gamePresetCancel"));
+            connect(start, &QPushButton::clicked, &dialog, &QDialog::accept);
+            connect(current, &QPushButton::clicked, &dialog, [&dialog] { dialog.done(2); });
+            connect(cancel, &QPushButton::clicked, &dialog, &QDialog::reject);
+            layout->addWidget(label);
+            layout->addWidget(quality);
+            layout->addWidget(summary);
+            layout->addWidget(compatibility);
+            layout->addSpacing(8);
+            layout->addWidget(buttons);
+            quality->setFocus();
+            const int result = dialog.exec();
+            if (result == QDialog::Rejected) {
+                return;
+            }
+            if (result == QDialog::Accepted) {
+                selected = static_cast<Quality>(quality->currentData().toInt());
+                UISettings::values.game_preset_qualities.insert(title_id, *selected);
+                config->SaveGamePresetQualities();
+            }
+        }
+        if (selected && Settings::ApplyGamePreset(Settings::values, title_id, *selected)) {
+            boot_settings_loaded = true;
+            QtCommon::system->ApplySettings();
+            Settings::UpdateGPUAccuracy();
+            LOG_INFO(Config, "Applied {} graphics preset for {}",
+                     Settings::GamePresetQualityToken(*selected), preset->name);
+        } else {
+            LOG_INFO(Config, "Using current settings for {}", preset->name);
+        }
     }
     Settings::LogSettings();
 

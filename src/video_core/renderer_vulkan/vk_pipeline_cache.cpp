@@ -5,23 +5,22 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <span>
-#include <string_view>
 #include <thread>
 #include <vector>
-#include <bit>
-#include <numeric>
 #include "common/cityhash.h"
-#include "common/scope_exit.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
+#include "common/scope_exit.h"
 #include "common/thread_worker.h"
 #include "core/core.h"
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
@@ -29,10 +28,11 @@
 #include "shader_recompiler/frontend/maxwell/control_flow.h"
 #include "shader_recompiler/frontend/maxwell/translate_program.h"
 #include "shader_recompiler/ir_opt/passes.h"
-#include "shader_recompiler/ir_opt/oot_visual_workaround.h"
 #include "shader_recompiler/program_header.h"
+#include "video_core/compute_binding_diagnostic.h"
 #include "video_core/engines/kepler_compute.h"
 #include "video_core/engines/maxwell_3d.h"
+#include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/memory_manager.h"
 #include "video_core/renderer_vulkan/fixed_pipeline_state.h"
 #include "video_core/renderer_vulkan/maxwell_to_vk.h"
@@ -49,10 +49,10 @@
 #include "video_core/shader_cache.h"
 #include "video_core/shader_environment.h"
 #include "video_core/shader_notify.h"
+#include "video_core/stall_diagnostics.h"
 #include "video_core/surface.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
-#include "video_core/gpu_logging/gpu_logging.h"
 
 #ifdef __ANDROID__
 #include "../../android/app/src/main/jni/android_settings.h"
@@ -70,8 +70,9 @@ using VideoCommon::ComputeEnvironment;
 using VideoCommon::FileEnvironment;
 using VideoCommon::GenericEnvironment;
 using VideoCommon::GraphicsEnvironment;
+using VideoCommon::ShaderSnapshotFailure;
 
-constexpr u32 CACHE_VERSION = 29;
+constexpr u32 CACHE_VERSION = 0x4e4f0002; // Supported-games lowering revision; separate from V3.
 constexpr size_t VULKAN_CACHE_FLUSH_PIPELINES = 128;
 constexpr size_t VULKAN_CACHE_FLUSH_MIN_SECONDS = 30;
 constexpr std::array<char, 8> VULKAN_CACHE_MAGIC_NUMBER{'y', 'u', 'z', 'u', 'v', 'k', 'c', 'h'};
@@ -486,17 +487,13 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
                             !device.HasBrokenParallelShaderCompiling()},
       use_shader_reuse{IsShaderReuseAllowed()},
       num_translation_threads{use_async_translation ? GetTotalTranslationWorkers() : 0},
-      oot_visual_workaround{[] {
-          const char* value = std::getenv("EDEN_NX2_OOT_VISUAL_WORKAROUND");
-          // On by default for Ocarina of Time; EDEN_NX2_OOT_VISUAL_WORKAROUND=0 turns it off.
-          return value == nullptr || std::string_view{value} != "0";
-      }()},
       workers(device.HasBrokenParallelShaderCompiling() ? 1ULL : GetTotalPipelineWorkers(),
               "VkPipelineBuilder", {}, Common::ThreadPlacement::Background),
       serialization_thread(1, "VkPipelineSerialization", {},
                            Common::ThreadPlacement::Background),
     translation_workers(num_translation_threads, "VkPipelineTranslator", {},
                         Common::ThreadPlacement::Background) {
+    VideoCommon::StallDiagnostics::Start();
     const char* tensor_mode = std::getenv("EDEN_NX2_TENSOR");
     const bool tensor_enabled = tensor_mode && std::string_view{tensor_mode} == "fast" &&
                                 device.IsExtCooperativeMatrixSupported();
@@ -841,12 +838,14 @@ GraphicsPipeline* PipelineCache::CurrentGraphicsPipeline() {
     return CurrentGraphicsPipelineSlowPath();
 }
 
-ComputePipeline* PipelineCache::CurrentComputePipeline() {
+ComputePipeline* PipelineCache::CurrentComputePipeline(std::optional<u64>& diagnostic_key) {
 
     const ShaderInfo* const shader{ComputeShader()};
     if (!shader) {
         return nullptr;
     }
+    if (shader->lowered_native)
+        diagnostic_key = shader->lowered_native->diagnostic_native_key;
     const auto& qmd{kepler_compute->launch_description};
     const ComputePipelineCacheKey key{
         .unique_hash = shader->unique_hash,
@@ -874,7 +873,6 @@ ComputePipeline* PipelineCache::CurrentComputePipeline() {
 
 void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading,
                                       const VideoCore::DiskResourceLoadCallback& callback) {
-    visual_workaround_title = title_id;
     if (title_id == 0) {
         return;
     }
@@ -897,8 +895,10 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     // every run with no pipelines (RX 6600 log: "Deleting old pipeline cache", ~600 pipelines
     // built in game). Own names let the caches coexist; files this version wrote under the old
     // names move over once.
+    // Serialized environments contain lowered Maxwell code. The corrected Yoshi carry/gather
+    // lowering must not reuse an older translation; leave V3's cache intact for comparisons.
     const auto cache_path = [&](std::string_view stem) {
-        return base_dir / fmt::format("{}.mythos.bin", stem);
+        return base_dir / fmt::format("{}.mythos-v4.bin", stem);
     };
     if (!Common::FS::Exists(cache_path("vulkan")) &&
         IsOwnPipelineCache(base_dir / "vulkan.bin", CACHE_VERSION)) {
@@ -1035,7 +1035,11 @@ void PipelineCache::LoadDiskResources(u64 title_id, std::stop_token stop_loading
     state.has_loaded = true;
     lock.unlock();
 
-    workers.WaitForRequests(stop_loading);
+    {
+        VideoCommon::StallDiagnostics::Scope diagnostic{
+            {VideoCommon::StallDiagnostics::Phase::PipelineLoadJoin, "pipeline-cache-load"}};
+        workers.WaitForRequests(stop_loading);
+    }
 
     if (use_vulkan_pipeline_cache) {
         SerializeVulkanPipelineCache(vulkan_pipeline_cache_filename, vulkan_pipeline_cache,
@@ -1256,6 +1260,8 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
     std::span<Shader::Environment* const> envs, PipelineStatistics* statistics,
     bool build_in_parallel, bool allow_translation) try {
     auto hash = key.Hash();
+    VideoCommon::StallDiagnostics::Scope diagnostic{
+        {VideoCommon::StallDiagnostics::Phase::PipelinePrepare, "graphics-prepare", hash}};
     LOG_DEBUG(Render_Vulkan, "{:#016x}", hash);
     const ShaderTranslationKey translation_key{MakeShaderTranslationKey(key, device)};
     std::shared_ptr<const ReusableShaders> shaders{FindReusableShaders(translation_key, envs, hash)};
@@ -1394,14 +1400,6 @@ std::shared_ptr<ReusableShaders> PipelineCache::BuildGraphicsShaders(
             programs[index] = MergeDualVertexPrograms(program_va, program_vb, env);
         }
 
-        if (const auto edits = Shader::Optimization::ApplyOotVisualWorkaround(
-                programs[index], program_id != 0 ? program_id : visual_workaround_title,
-                key.unique_hashes[index],
-                oot_visual_workaround)) {
-            LOG_WARNING(Render_Vulkan,
-                        "TEMPORARY OoT visual workaround: shader {:016x}, {} scalar edits",
-                        key.unique_hashes[index], *edits);
-        }
         if (device.GetDriverID() != VK_DRIVER_ID_NVIDIA_PROPRIETARY && Shader::Optimization::HasBrokenPattern(programs[index])) {
             LOG_WARNING(Render_Vulkan, "0x{:016x}: Skipping shader with known issues", key.unique_hashes[index]);
             return nullptr;
@@ -1567,8 +1565,10 @@ public:
         LogEvery10Seconds();
     }
 
-    void NotDetached() {
+    void NotDetached(ShaderSnapshotFailure reason, u32 limit) {
         ++not_detached;
+        ++failures[static_cast<size_t>(reason)];
+        largest_rejected_limit = (std::max)(largest_rejected_limit, limit);
         LogEvery10Seconds();
     }
 
@@ -1593,10 +1593,16 @@ private:
         LOG_INFO(Render_Vulkan,
                  "Graphics pipelines translated on workers in the last 10 s: {} queued ({} KiB "
                  "of state copied), {} adopted ({:.1f} ms on workers), {} built on the GPU "
-                 "thread (texture pool not contiguous); GPU thread: {:.1f} ms preparing, {:.1f} "
+                 "thread (snapshot fallback); GPU thread: {:.1f} ms preparing, {:.1f} "
                  "ms waiting",
                  queued, copied_bytes / 1024, adopted, ms(build_time),
                  not_detached, ms(preparation_time), ms(wait_time));
+        LOG_INFO(Render_Vulkan,
+                 "Graphics snapshot fallback reasons: texture pool entry limit {}, texture pool "
+                 "not fully mapped {}, largest rejected limit {}",
+                 failures[static_cast<size_t>(ShaderSnapshotFailure::TexturePoolEntryLimit)],
+                 failures[static_cast<size_t>(ShaderSnapshotFailure::TexturePoolNotMapped)],
+                 largest_rejected_limit);
         // Start a new window.
         *this = TranslationReport{};
     }
@@ -1604,6 +1610,8 @@ private:
     u32 queued{};
     u32 not_detached{};
     u32 adopted{};
+    u32 largest_rejected_limit{};
+    std::array<u32, static_cast<size_t>(ShaderSnapshotFailure::Count)> failures{};
     size_t copied_bytes{};
     Duration preparation_time{};
     Duration wait_time{};
@@ -1690,7 +1698,10 @@ void PipelineCache::SerializeGraphicsPipeline(const GraphicsPipelineCacheKey& ke
 // met them, so translation never reads guest memory for instructions. Compute pipelines stay
 // synchronous.
 bool PipelineCache::CanTranslateAsynchronously() const {
-    if (!use_async_translation) {
+    // Without the reuse recorder, native pointer classification can query live GPU mappings.
+    // That state is not part of the detached snapshot: keep this debug path on the GPU thread.
+    // Driver pipeline compilation can still use its asynchronous workers.
+    if (!use_async_translation || !use_shader_reuse) {
         return false;
     }
     if (!maxwell3d->GetNativeMacroEngine().native_turing) {
@@ -1718,8 +1729,9 @@ PipelineCache::QueueGraphicsTranslation() {
         if (graphics_key.unique_hashes[index] == 0) {
             continue;
         }
-        if (!environments.envs[index].Detach()) {
-            GetTranslationReport().NotDetached();
+        const auto failure = environments.envs[index].Detach();
+        if (failure != ShaderSnapshotFailure::None) {
+            GetTranslationReport().NotDetached(failure, maxwell3d->regs.tex_header.limit);
             return std::nullopt;
         }
         snapshot_bytes += environments.envs[index].SnapshotSizeBytes();
@@ -1785,6 +1797,28 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
     };
     const GPUVAddr program_base{kepler_compute->regs.code_loc.Address()};
     const auto& qmd{kepler_compute->launch_description};
+    namespace diag = VideoCommon::ComputeBindingDiagnostic;
+    std::optional<diag::Record> trace;
+    std::optional<diag::Scope> trace_scope;
+    if (shader->lowered_native && diag::Matches(shader->lowered_native->diagnostic_native_key) &&
+        diag::compile_limit.Claim()) {
+        trace.emplace();
+        trace->phase = diag::Phase::Compile;
+        trace->native_key = *shader->lowered_native->diagnostic_native_key;
+        trace->shader_hash = key.unique_hash;
+        trace->serial = diag::sequence.fetch_add(1, std::memory_order_relaxed);
+        trace->program = program_base + qmd.program_start;
+        trace->cbuf_enabled = (qmd.const_buffer_enable_mask & 1) != 0;
+        if (trace->cbuf_enabled) {
+            trace->cbuf_base = qmd.const_buffer_config[0].Address();
+            trace->cbuf_size = qmd.const_buffer_config[0].size;
+        }
+        trace_scope.emplace(*trace);
+    }
+    SCOPE_EXIT {
+        if (trace_scope)
+            diag::Emit(*trace);
+    };
     ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start,
                            shader->lowered_native, profile.support_cooperative_matrix};
     env.SetCachedSize(shader->size_bytes);
@@ -1806,6 +1840,9 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
     ShaderPools& pools, const ComputePipelineCacheKey& key, Shader::Environment& env,
     PipelineStatistics* statistics, bool build_in_parallel) try {
     auto hash = key.Hash();
+    VideoCommon::StallDiagnostics::Scope diagnostic{
+        {VideoCommon::StallDiagnostics::Phase::PipelinePrepare, "compute-prepare",
+         key.unique_hash}};
     if (device.HasBrokenCompute()) {
         LOG_ERROR(Render_Vulkan, "Skipping {:#016x}", hash);
         return nullptr;
@@ -1821,13 +1858,6 @@ std::unique_ptr<ComputePipeline> PipelineCache::CreateComputePipeline(
     }
 
     auto program{TranslateProgram(pools.inst, pools.block, env, cfg, host_info)};
-    if (const auto edits = Shader::Optimization::ApplyOotVisualWorkaround(
-            program, program_id != 0 ? program_id : visual_workaround_title, key.unique_hash,
-            oot_visual_workaround)) {
-        LOG_WARNING(Render_Vulkan,
-                    "TEMPORARY OoT visual workaround: shader {:016x}, {} scalar edits",
-                    key.unique_hash, *edits);
-    }
     const VkDriverIdKHR driver_id = device.GetDriverID();
     const bool needs_shared_mem_clamp =
         driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY ||

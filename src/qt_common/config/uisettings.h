@@ -11,12 +11,14 @@
 #include <vector>
 #include <QByteArray>
 #include <QMetaType>
+#include <QMap>
 #include <QString>
 #include <QStringList>
 #include <QVector>
 #include <qdir.h>
 #include "common/common_types.h"
 #include "common/settings.h"
+#include "common/game_presets.h"
 #include "common/settings_enums.h"
 #include "qt_common/config/qt_config.h"
 
@@ -217,6 +219,7 @@ struct Values {
     Setting<bool> favorites_expanded{linkage, true, "favorites_expanded", Category::UiGameList};
     QVector<u64> favorited_ids;
     QMap<u64, QDir> ryujinx_link_paths;
+    QMap<u64, Settings::GamePresetQuality> game_preset_qualities;
 
     // perf overlay
     Setting<bool> show_perf_overlay{linkage, false, "show_perf_overlay", Category::UiGameList};

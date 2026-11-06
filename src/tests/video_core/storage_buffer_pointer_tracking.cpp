@@ -300,10 +300,9 @@ TEST_CASE("Loaded global pointers do not inherit the source buffer descriptor",
         ir.WriteGlobal32(Address(ir, add_offset ? IR::U32{ir.IAdd(low, ir.Imm32(16))} : low, high),
                          ir.Imm32(1));
 
-        // A native compute write through the loaded pointer binds that pointer's table entry
-        // (the 8 bytes at 0x110's target) next to the holder, and stays global.
-        CHECK(fixture.TrackedOffsets() ==
-              (native ? std::vector<u32>{0x110, 0x110} : std::vector<u32>{0x110}));
+        // Loading a pointer records the source buffer; the subsequent write stays global
+        // because indirect pointer-table bindings are unsupported.
+        CHECK(fixture.TrackedOffsets() == std::vector<u32>{0x110});
         const auto has = [&](IR::Opcode opcode) {
             return std::ranges::any_of(fixture.entry.Instructions(), [=](const IR::Inst& inst) {
                 return inst.GetOpcode() == opcode;
@@ -313,17 +312,8 @@ TEST_CASE("Loaded global pointers do not inherit the source buffer descriptor",
         CHECK(has(IR::Opcode::WriteGlobal32));
         CHECK_FALSE(has(IR::Opcode::WriteStorage32));
         const auto& descriptors{fixture.program.info.storage_buffers_descriptors};
-        REQUIRE(descriptors.size() == (native ? 2U : 1U));
-        const auto with_indirect = [&](u32 indirect) {
-            return std::ranges::find(descriptors, indirect,
-                                     &Shader::StorageBufferDescriptor::indirect_offset);
-        };
-        REQUIRE(with_indirect(~0U) != descriptors.end());
-        CHECK_FALSE(with_indirect(~0U)->is_written);
-        if (native) {
-            REQUIRE(with_indirect(0) != descriptors.end());
-            CHECK(with_indirect(0)->is_written);
-        }
+        REQUIRE(descriptors.size() == 1U);
+        CHECK_FALSE(descriptors.front().is_written);
     }
 }
 

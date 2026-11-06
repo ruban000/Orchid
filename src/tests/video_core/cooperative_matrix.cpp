@@ -27,18 +27,16 @@ struct TensorProgram {
     IR::Program program;
     Profile profile;
 
-    /// software_depth != 0: software HMMA TensorMulAdds (flags 8 or 16), no cooperative matrix.
-    explicit TensorProgram(u32 count = 1, u32 software_depth = 0) {
+    explicit TensorProgram(u32 count = 1) {
         program.stage = Stage::Compute;
         program.workgroup_size = {64, 1, 1};
         program.blocks = {&block};
         program.post_order_blocks = {&block};
         program.syntax_list = {{{.block = &block}, IR::AbstractSyntaxNode::Type::Block},
                                {{}, IR::AbstractSyntaxNode::Type::Return}};
-        program.info.uses_tensor_mul_add = count != 0 && software_depth == 0;
+        program.info.uses_tensor_mul_add = count != 0;
         program.info.uses_subgroup_invocation_id = count != 0;
-        program.info.uses_subgroup_shuffles = software_depth != 0;
-        profile.support_cooperative_matrix = software_depth == 0;
+        profile.support_cooperative_matrix = true;
         profile.supported_spirv = 0x00010500;
         profile.max_compute_shared_memory_size = 49152;
         profile.max_tensor_workgroup_size = 1024;
@@ -57,7 +55,6 @@ struct TensorProgram {
             const auto result = ir.Inst(IR::Opcode::TensorMulAdd, inputs[0], inputs[1],
                                        inputs[2], inputs[3], inputs[4], inputs[5],
                                        inputs[6], inputs[7]);
-            result.Inst()->SetFlags<u32>(software_depth);
             inputs[6] = IR::U32{ir.CompositeExtract(result, 0)};
             inputs[7] = IR::U32{ir.CompositeExtract(result, 1)};
         }
@@ -253,42 +250,18 @@ TEST_CASE("NV tensor shape requires the exact scope and all four half types", "[
     REQUIRE_FALSE(Vulkan::IsTensorMatrixShape(wrong));
 }
 
-TEST_CASE("Software HMMA calls one shared helper per depth without tensor resources",
-          "[video_core][tensor]") {
-    for (const u32 depth : {8U, 16U}) {
-        TensorProgram fixture{3, depth};
-        const auto code = fixture.Emit("software-" + std::to_string(depth));
-        REQUIRE_FALSE(HasCapability(code, 5357)); // CooperativeMatrixNV
-        REQUIRE(HasCapability(code, 65));         // GroupNonUniformShuffle
-        REQUIRE(Instructions(code, 54).size() >= 2); // OpFunction: main and the helper
-        REQUIRE(Instructions(code, 57).size() == 3); // OpFunctionCall per HMMA
-        REQUIRE(Instructions(code, 5361).empty());   // no OpCooperativeMatrixMulAddNV
-        REQUIRE(Instructions(code, 345).size() == 4); // helper shuffles: two A rows, two B columns
-    }
-}
-
-TEST_CASE("Native tensor lowering remains opt-in; software HMMA lowers otherwise", "[video_core][tensor]") {
+TEST_CASE("Native tensor lowering remains opt-in and preserves fallback errors", "[video_core][tensor]") {
     TensorMode mode{nullptr};
     std::array<Ampere::Instruction, 2> code{{
         {{0x0810723c, 12, 0x8ff, 0}}, {{0x0000794d, 0, 0x03800000, 0}}}};
-    // The cooperative-matrix TENSOR_MUL_ADD (0x5d3 without the software bit 48) only with
-    // EDEN_NX2_TENSOR=fast and device support; otherwise the software expansion.
-    const auto cooperative = [](const Ampere::LoweredProgram& lowered) {
-        return std::any_of(lowered.instructions.begin(), lowered.instructions.end(), [](u64 word) {
-            return (word >> 52) == 0x5d3 && !((word >> 48) & 1);
-        });
-    };
-    const auto off = Ampere::LowerToMaxwell(code, false, true);
-    REQUIRE(static_cast<bool>(off));
-    REQUIRE_FALSE(cooperative(off));
+    REQUIRE_FALSE(static_cast<bool>(Ampere::LowerToMaxwell(code, false, true)));
     TensorMode::Set("fast");
     const auto unsupported = Ampere::LowerToMaxwell(code, false, false);
-    REQUIRE(static_cast<bool>(unsupported));
-    REQUIRE_FALSE(cooperative(unsupported));
+    REQUIRE_FALSE(static_cast<bool>(unsupported));
+    REQUIRE(unsupported.error.find("matrix multiply") != std::string_view::npos);
     const auto supported = Ampere::LowerToMaxwell(code, false, true);
     REQUIRE(static_cast<bool>(supported));
     REQUIRE(supported.instructions[0] >> 52 == 0x5d3);
-    REQUIRE(cooperative(supported));
     REQUIRE(Maxwell::Decode(supported.instructions[0]) == Maxwell::Opcode::TENSOR_MUL_ADD);
     code[0].words[0] &= ~0x7000U;
     REQUIRE_FALSE(static_cast<bool>(Ampere::LowerToMaxwell(code, false, true)));

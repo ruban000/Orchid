@@ -54,7 +54,7 @@ using VideoCommon::LoadPipelines;
 using VideoCommon::SerializePipeline;
 using Context = ShaderContext::Context;
 
-constexpr u32 CACHE_VERSION = 24;
+constexpr u32 CACHE_VERSION = 0x4e4f0001; // Isolated no-OOT test cache.
 
 template <typename Container>
 auto MakeSpan(Container& container) {

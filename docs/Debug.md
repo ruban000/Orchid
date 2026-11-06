@@ -121,3 +121,22 @@ Here is a short checklist of items to look at to make sure are appropriate:
 - Image being rendered to is the same as the one being presented when rendering to the swapchain
 
 Alternatively, a [RenderDoc Extension](https://github.com/baldurk/renderdoc-contrib/tree/main/baldurk/whereismydraw) ([Archive](https://web.archive.org/web/20250000000000*/https://github.com/baldurk/renderdoc-contrib/tree/main/baldurk/whereismydraw)) exists which automates doing a lot of these manual steps.
+
+## Native compute binding trace
+
+For a targeted diagnostic, set `EDEN_NX2_TRACE_COMPUTE_KEY` before launch to exactly
+16 hexadecimal digits representing the native program's FNV key. With the variable unset or
+invalid, the trace is disabled. It records at most eight matching compile and eight matching
+dispatch observations per process. These are independent observations: a compile record is not
+necessarily paired with any particular dispatch. The trace uses values already read by the normal
+paths and does not read extra guest memory. Native program identity is unavailable when only a
+disk `FileEnvironment` exists. A cached pipeline can still be associated with a native key when
+the current shader has retained its native vector.
+
+The trace records CB0 state and observations for its 0x50 storage descriptor. The next qword is
+not read by the native compute binding path. `*_known` fields distinguish unavailable values from
+zero; a duplicate descriptor is ambiguous, and multi-range bindings have no single reported host
+range. `cache_buffer_id` identifies an internal cache slot, not a Vulkan handle. Values describe
+CPU observations and do not prove which values a GPU actually accessed. Trace metadata collection
+does not allocate; the existing logging backend can allocate when formatting a record. This
+diagnostic does not fix a device loss or establish its cause.

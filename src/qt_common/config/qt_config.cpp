@@ -74,6 +74,46 @@ void QtConfig::SaveAllValues() {
     SaveQtValues();
 }
 
+void QtConfig::SaveGamePresetQualities() {
+    if (!global) {
+        return;
+    }
+    BeginGroup(Settings::TranslateCategory(Settings::Category::Ui));
+    WriteGamePresetQualities();
+    EndGroup();
+    WriteToIni();
+}
+
+void QtConfig::ReadGamePresetQualities() {
+    UISettings::values.game_preset_qualities.clear();
+    const int size = BeginArray("game_presets");
+    for (int index = 0; index < size; ++index) {
+        SetArrayIndex(index);
+        const u64 id = ReadUnsignedIntegerSetting("program_id");
+        if (Settings::FindGamePreset(id) != nullptr) {
+            UISettings::values.game_preset_qualities.insert(
+                id, Settings::ParseGamePresetQuality(ReadStringSetting("quality"))
+                        .value_or(Settings::GamePresetQuality::Standard));
+        }
+    }
+    EndArray();
+}
+
+void QtConfig::WriteGamePresetQualities() {
+    BeginArray("game_presets");
+    int index = 0;
+    const auto& qualities = UISettings::values.game_preset_qualities;
+    for (auto it = qualities.cbegin(); it != qualities.cend(); ++it) {
+        if (Settings::FindGamePreset(it.key()) == nullptr) {
+            continue;
+        }
+        SetArrayIndex(index++);
+        WriteIntegerSetting("program_id", it.key());
+        WriteStringSetting("quality", std::string{Settings::GamePresetQualityToken(it.value())});
+    }
+    EndArray();
+}
+
 void QtConfig::ReadQtValues() {
     if (global) {
         ReadUIValues();
@@ -284,6 +324,7 @@ void QtConfig::ReadUIValues() {
     ReadScreenshotValues();
     ReadShortcutValues();
     ReadMultiplayerValues();
+    ReadGamePresetQualities();
 
     ReadCategory(Settings::Category::Ui);
     ReadCategory(Settings::Category::UiGeneral);
@@ -511,6 +552,7 @@ void QtConfig::SaveUIValues() {
     SaveScreenshotValues();
     SaveShortcutValues();
     SaveMultiplayerValues();
+    WriteGamePresetQualities();
 
     EndGroup();
 }

@@ -14,8 +14,10 @@
 #include <fmt/format.h>
 
 #include "video_core/renderer_vulkan/vk_query_cache.h"
+#include "video_core/stall_diagnostics.h"
 
 #include "common/settings.h"
+#include "video_core/renderer_vulkan/vk_hitch_diagnostic.h"
 #include "common/thread.h"
 #include "video_core/gpu_logging/gpu_logging.h"
 #include "video_core/readback_diagnostics.h"
@@ -81,16 +83,38 @@ void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore)
 }
 
 void Scheduler::WaitWorker() {
+    const bool trace = Common::HitchDiagnostic::Enabled();
+    const u64 begin_ns = trace ? Common::HitchDiagnostic::NowNs() : 0;
     DispatchWork();
 
     // Ensure the queue is drained.
     {
+        VideoCommon::StallDiagnostics::Scope diagnostic{
+            {VideoCommon::StallDiagnostics::Phase::SchedulerQueueDrain, "scheduler-drain-caller"}};
         std::unique_lock ql{queue_mutex};
         event_cv.wait(ql, [this] { return work_queue.empty(); });
     }
 
-    // Now wait for execution to finish.
-    std::scoped_lock el{execution_mutex};
+    const u64 drained_ns = trace ? Common::HitchDiagnostic::NowNs() : 0;
+    // Now wait for execution to finish. Release the execution lock before diagnostic logging.
+    u64 end_ns = 0;
+    {
+        VideoCommon::StallDiagnostics::Scope diagnostic{
+            {VideoCommon::StallDiagnostics::Phase::SchedulerExecutionAcquire,
+             "scheduler-drain-caller"}};
+        std::scoped_lock el{execution_mutex};
+        end_ns = trace ? Common::HitchDiagnostic::NowNs() : 0;
+    }
+    if (trace) {
+        if (HitchTrace::Claim(HitchTrace::Event::WorkerWait, end_ns - begin_ns)) {
+            LOG_INFO(Render_Vulkan,
+                     "VulkanHitch worker_wait begin_ns={} end_ns={} queue_drain_ns={} "
+                     "inflight_record_wait_ns={} logical_tick={} submitted_tick={} gpu_tick={}",
+                     begin_ns, end_ns, drained_ns - begin_ns, end_ns - drained_ns,
+                     master_semaphore->CurrentTick(), master_semaphore->DiagnosticSubmittedTick(),
+                     master_semaphore->KnownGpuTick());
+        }
+    }
 }
 
 void Scheduler::DispatchWork() {
@@ -103,6 +127,10 @@ void Scheduler::DispatchWork() {
         bool wake;
         {
             std::scoped_lock ql{queue_mutex};
+            if (Common::HitchDiagnostic::Enabled()) {
+                chunk->MarkDiagnosticQueued(Common::HitchDiagnostic::NowNs(), work_queue.size() + 1,
+                                             master_semaphore->CurrentTick());
+            }
             work_queue.push(std::move(chunk));
             wake = worker_waiting;
         }
@@ -328,6 +356,12 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
             } while (std::chrono::steady_clock::now() < end);
         }
 
+        const bool trace = Common::HitchDiagnostic::Enabled();
+        u64 dequeued_ns = 0;
+        u64 execute_begin_ns = 0;
+        u64 execute_end_ns = 0;
+        u64 ready_ns = 0;
+        bool has_submit = false;
         {
             std::unique_lock lk{queue_mutex};
 
@@ -343,6 +377,7 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
                 return;
             }
 
+            dequeued_ns = trace ? Common::HitchDiagnostic::NowNs() : 0;
             // Exchange lock ownership so that we take the execution lock before
             // the queue lock goes out of scope. This allows us to force execution
             // to complete in the next step.
@@ -350,13 +385,34 @@ void Scheduler::WorkerThread(std::stop_token stop_token) {
 
             // Perform the work, tracking whether the chunk was a submission
             // before executing.
-            const bool has_submit = work->HasSubmit();
-            work->ExecuteAll(current_cmdbuf, current_upload_cmdbuf);
+            has_submit = work->HasSubmit();
+            execute_begin_ns = trace ? Common::HitchDiagnostic::NowNs() : 0;
+            {
+                VideoCommon::StallDiagnostics::Scope diagnostic{
+                    {VideoCommon::StallDiagnostics::Phase::SchedulerChunk, "scheduler-worker"}};
+                work->ExecuteAll(current_cmdbuf, current_upload_cmdbuf);
+            }
+            execute_end_ns = trace ? Common::HitchDiagnostic::NowNs() : 0;
 
             // If the chunk was a submission, reallocate the command buffer.
             if (has_submit) {
                 AllocateWorkerCommandBuffer();
             }
+            ready_ns = trace ? Common::HitchDiagnostic::NowNs() : 0;
+        }
+        if (trace && HitchTrace::Claim(HitchTrace::Event::WorkerChunk,
+                                      ready_ns - work->diagnostic_enqueue_ns)) {
+            LOG_INFO(Render_Vulkan,
+                     "VulkanHitch worker_chunk enqueue_ns={} dequeue_ns={} execute_begin_ns={} "
+                     "execute_end_ns={} ready_ns={} queue_delay_ns={} execution_lock_ns={} "
+                     "execute_ns={} allocate_ns={} depth={} submit={} queued_logical_tick={} "
+                     "logical_tick={} submitted_tick={} gpu_tick={}",
+                     work->diagnostic_enqueue_ns, dequeued_ns, execute_begin_ns, execute_end_ns,
+                     ready_ns, dequeued_ns - work->diagnostic_enqueue_ns,
+                     execute_begin_ns - dequeued_ns, execute_end_ns - execute_begin_ns,
+                     ready_ns - execute_end_ns, work->diagnostic_queue_depth, has_submit,
+                     work->diagnostic_logical_tick, master_semaphore->CurrentTick(),
+                     master_semaphore->DiagnosticSubmittedTick(), master_semaphore->KnownGpuTick());
         }
 
         {
@@ -406,11 +462,35 @@ u64 Scheduler::SubmitExecution(VkSemaphore signal_semaphore, VkSemaphore wait_se
             on_submit();
         }
 
-        std::scoped_lock lock{submit_mutex};
+        const bool trace = Common::HitchDiagnostic::Enabled();
+        const u64 mutex_begin_ns = trace ? Common::HitchDiagnostic::NowNs() : 0;
+        std::unique_lock lock{submit_mutex, std::defer_lock};
+        {
+            VideoCommon::StallDiagnostics::Scope diagnostic{
+                {VideoCommon::StallDiagnostics::Phase::SubmitLockAcquire, "scheduler-worker", 0, 0,
+                 -1, signal_value}};
+            lock.lock();
+        }
+
+        const u64 submit_begin_ns = trace ? Common::HitchDiagnostic::NowNs() : 0;
         VideoCommon::ReadbackDiagnostics::Scope diagnostic{
             VideoCommon::ReadbackDiagnostics::Event::Submit};
-        switch (const VkResult result = master_semaphore->SubmitQueue(
-                    cmdbuf, upload_cmdbuf, signal_semaphore, wait_semaphore, signal_value)) {
+        const VkResult result = master_semaphore->SubmitQueue(
+            cmdbuf, upload_cmdbuf, signal_semaphore, wait_semaphore, signal_value);
+        if (trace) {
+            const u64 end_ns = Common::HitchDiagnostic::NowNs();
+            if (HitchTrace::Claim(HitchTrace::Event::Submit, end_ns - mutex_begin_ns)) {
+                LOG_INFO(Render_Vulkan,
+                         "VulkanHitch submit begin_ns={} driver_begin_ns={} end_ns={} "
+                         "mutex_wait_ns={} driver_ns={} tick={} logical_tick={} submitted_tick={} "
+                         "gpu_tick={} result={} waits_binary={}",
+                         mutex_begin_ns, submit_begin_ns, end_ns, submit_begin_ns - mutex_begin_ns,
+                         end_ns - submit_begin_ns, signal_value, master_semaphore->CurrentTick(),
+                         master_semaphore->DiagnosticSubmittedTick(), master_semaphore->KnownGpuTick(),
+                         static_cast<int>(result), wait_semaphore != VK_NULL_HANDLE);
+            }
+        }
+        switch (result) {
         case VK_SUCCESS:
             // Log successful queue submission
             if (GPU::Logging::IsActive() &&

@@ -5,6 +5,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdint>
+
+#if (defined(__linux__) || defined(__APPLE__)) && __has_include(<execinfo.h>)
+#include <dlfcn.h>
+#include <execinfo.h>
+#endif
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -25,6 +31,31 @@
 #include "video_core/texture_cache/util.h"
 
 namespace Tegra {
+namespace {
+// Called only for an already-reported scalar fault with the explicit trace opt-in.
+// Capture host callers here; source_location inside Read's lambda names the lambda itself.
+void LogScalarReadFaultStack(u64 address, size_t bits, u32 record) {
+#if (defined(__linux__) || defined(__APPLE__)) && __has_include(<execinfo.h>)
+    void* frames[24]{};
+    const int count = backtrace(frames, static_cast<int>(std::size(frames)));
+    for (int index = 0; index < count; ++index) {
+        Dl_info info{};
+        const bool resolved = dladdr(frames[index], &info) != 0;
+        const auto pc = reinterpret_cast<std::uintptr_t>(frames[index]);
+        const auto base = reinterpret_cast<std::uintptr_t>(info.dli_fbase);
+        LOG_ERROR(HW_GPU, "Scalar read fault stack bits={} fault={:#x} record={} frame={} "
+                          "pc={:#x} module={} offset={:#x} symbol={}",
+                  bits, address, record, index, pc, resolved && info.dli_fname ? info.dli_fname : "unknown",
+                  resolved ? pc - base : pc,
+                  resolved && info.dli_sname ? info.dli_sname : "unknown");
+    }
+#else
+    LOG_ERROR(HW_GPU, "Scalar read fault stack unavailable on this platform: bits={} "
+                      "fault={:#x} record={}", bits, address, record);
+#endif
+}
+} // namespace
+
 bool MemoryManager::IsShuttingDown() const {
     return system.IsShuttingDown();
 }
@@ -310,9 +341,28 @@ T MemoryManager::Read(GPUVAddr addr) const {
         const u8* const page_pointer = GetPointer(address);
         if (!page_pointer) {
             static std::atomic<u32> reported{};
-            if (reported.fetch_add(1) < 16) {
+            const u32 report = reported.fetch_add(1);
+            if (report < 16) {
                 LOG_ERROR(HW_GPU, "Read{} of unmapped GPU address {:#x}", sizeof(T) * 8,
                           address);
+                if (Common::UnmappedReadDiagnostic::Enabled()) {
+                    // Re-query only on this failure path. Mapping can change concurrently:
+                    // these fields describe the diagnostic instant, not the original lookup.
+                    const auto translated = GpuToCpuAddress(address);
+                    const bool backed_now = translated && memory.GetPointer<u8>(*translated);
+                    const char* const classification = !translated ? "gpu-translation"
+                        : backed_now ? "mapping-changed-or-transient" : "missing-device-backing";
+                    LOG_ERROR(HW_GPU, "Scalar read fault trace: memory_id={} requested={:#x}+{} "
+                                      "fault={:#x} mapping_at_trace={} translated={} device={:#x} "
+                                      "backed_now={} record={}/16",
+                              GetID(), addr, sizeof(T), address, classification,
+                              translated.has_value(), translated.value_or(0), backed_now, report + 1);
+                    LogScalarReadFaultStack(address, sizeof(T) * 8, report + 1);
+                    if (report == 15) {
+                        LOG_ERROR(HW_GPU, "Scalar read fault trace cap reached for Read{}: "
+                                          "additional_faults_not_traced=true", sizeof(T) * 8);
+                    }
+                }
             }
         }
         return page_pointer;

@@ -159,19 +159,4 @@ TEST_CASE("Ampere SURED rejects unsupported formats and descriptor conflicts",
     conflicting[1].words[1] |= 1U << 22;
     REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(conflicting)));
 }
-
-TEST_CASE("Ampere SURED keeps its operation for Maxwell", "[video_core][ampere][sured]") {
-    // Ocarina of Time's FSR pass ORs into a 2D surface (operation 6 at bits 87-90).
-    std::array<Instruction, 2> code{{captured, exit_instruction}};
-    code[0].words[2] = 0x0310e000;
-    const auto lowered = LowerToMaxwell(code);
-    REQUIRE(static_cast<bool>(lowered));
-    REQUIRE(std::any_of(lowered.instructions.begin(), lowered.instructions.end(), [](u64 insn) {
-        return (insn >> 52) == 0xeb4 && ((insn >> 24) & 7) == 6;
-    }));
-    code[0].words[2] = 0x0410e000; // EXCH has no Maxwell SURED form
-    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(code)));
-    code[0].words[2] = 0x0090e000; // MIN: signedness not known here
-    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(code)));
-}
 } // namespace

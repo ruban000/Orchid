@@ -6,7 +6,9 @@
 
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
+#include <limits>
 #include <span>
 
 #include "common/alignment.h"
@@ -39,6 +41,101 @@ template <u32 mask, u32 incr_amount>
 void incrpdep(u32& value) {
     static constexpr u32 swizzled_incr = pdep<mask>(incr_amount);
     value = ((value | ~mask) + swizzled_incr) & mask;
+}
+
+// A GOB stores each row in four contiguous 16-byte runs. Traverse eight-row GOB bands,
+// avoiding per-pixel address arithmetic while keeping only eight output rows active.
+// This avoids evicting unfinished output rows when textures have large row strides.
+// Native tiling only exchanges two address bits above those runs.
+template <bool NATIVE>
+void UnswizzleGobs2D(std::span<u8> output, std::span<const u8> input, u32 row_bytes, u32 height,
+                     u32 block_height, u32 gobs_in_x) {
+    static constexpr std::array<u32, 8> row_offsets =
+        NATIVE ? std::array<u32, 8>{0, 16, 32, 48, 128, 144, 160, 176}
+               : std::array<u32, 8>{0, 16, 64, 80, 128, 144, 192, 208};
+    static constexpr std::array<u32, 4> column_offsets{0, NATIVE ? 64U : 32U, 256,
+                                                       NATIVE ? 320U : 288U};
+    const u32 block_rows = GOB_SIZE_Y << block_height;
+    const u32 block_bytes = GOB_SIZE << block_height;
+    const u32 blocks_y = Common::DivCeil(height, block_rows);
+    const u32 used_gobs_x = static_cast<u32>((u64{row_bytes} + GOB_SIZE_X - 1) / GOB_SIZE_X);
+    for (u32 block_y = 0; block_y < blocks_y; ++block_y) {
+        const u32 first_y = block_y * block_rows;
+        const u32 rows = (std::min)(block_rows, height - first_y);
+        const u32 used_gobs_y = Common::DivCeil(rows, GOB_SIZE_Y);
+        for (u32 gob_y = 0; gob_y < used_gobs_y; ++gob_y) {
+            const u32 first_row = gob_y * GOB_SIZE_Y;
+            const u32 lines = (std::min)(GOB_SIZE_Y, rows - first_row);
+            for (u32 gob_x = 0; gob_x < used_gobs_x; ++gob_x) {
+                const u32 first_x = gob_x * GOB_SIZE_X;
+                const u32 bytes = (std::min)(GOB_SIZE_X, row_bytes - first_x);
+                const size_t block_offset = (size_t{block_y} * gobs_in_x + gob_x) * block_bytes;
+                const u8* const gob = input.data() + block_offset + gob_y * GOB_SIZE;
+                for (u32 line = 0; line < lines; ++line) {
+                    u8* const dst =
+                        output.data() + size_t{first_y + first_row + line} * row_bytes + first_x;
+                    const u8* const src = gob + row_offsets[line];
+                    if (bytes == GOB_SIZE_X) {
+                        std::memcpy(dst, src, 16);
+                        std::memcpy(dst + 16, src + column_offsets[1], 16);
+                        std::memcpy(dst + 32, src + column_offsets[2], 16);
+                        std::memcpy(dst + 48, src + column_offsets[3], 16);
+                    } else {
+                        for (u32 column = 0; column < bytes; column += 16) {
+                            std::memcpy(dst + column, src + column_offsets[column / 16],
+                                        (std::min)(16U, bytes - column));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+bool TryUnswizzleGobs2D(std::span<u8> output, std::span<const u8> input, u32 bytes_per_pixel,
+                        u32 width, u32 height, u32 depth, u32 block_height, u32 block_depth,
+                        u32 stride, bool native_tiling) {
+    // Keep unusual formats, 3D block layouts and short source spans on the original path.
+    if (depth != 1 || block_depth != 0 || block_height > 5 || height == 0 ||
+        (bytes_per_pixel != 1 && bytes_per_pixel != 2 && bytes_per_pixel != 4 &&
+         bytes_per_pixel != 8 && bytes_per_pixel != 16)) {
+        return false;
+    }
+    constexpr u64 MaxOffset = (std::numeric_limits<u32>::max)();
+    const u64 row_bytes = u64{width} * bytes_per_pixel;
+    if (row_bytes < GOB_SIZE_X || row_bytes > MaxOffset || stride < row_bytes) {
+        return false;
+    }
+    const u64 linear_bytes = row_bytes * height;
+    if (linear_bytes > MaxOffset || output.size() < linear_bytes) {
+        return false;
+    }
+    const u64 gobs_in_x = (u64{stride} + GOB_SIZE_X - 1) >> GOB_SIZE_X_SHIFT;
+    const u64 block_rows = u64{GOB_SIZE_Y} << block_height;
+    const u64 blocks_y = (u64{height} + block_rows - 1) / block_rows;
+    const u64 block_bytes = u64{GOB_SIZE} << block_height;
+    const u64 block_row_bytes = gobs_in_x * block_bytes;
+    if (block_row_bytes > MaxOffset || blocks_y > MaxOffset / block_row_bytes) {
+        return false;
+    }
+    const u64 tiled_bytes = blocks_y * block_row_bytes;
+    if (input.size() < tiled_bytes) {
+        return false;
+    }
+    // The original traversal remains available for callers with overlapping spans.
+    const auto src = reinterpret_cast<std::uintptr_t>(input.data());
+    const auto dst = reinterpret_cast<std::uintptr_t>(output.data());
+    if (src <= dst ? dst - src < tiled_bytes : src - dst < linear_bytes) {
+        return false;
+    }
+    if (native_tiling) {
+        UnswizzleGobs2D<true>(output, input, static_cast<u32>(row_bytes), height, block_height,
+                              static_cast<u32>(gobs_in_x));
+    } else {
+        UnswizzleGobs2D<false>(output, input, static_cast<u32>(row_bytes), height, block_height,
+                               static_cast<u32>(gobs_in_x));
+    }
+    return true;
 }
 
 template <bool TO_LINEAR, u32 BYTES_PER_PIXEL>
@@ -188,6 +285,10 @@ void UnswizzleTexture(std::span<u8> output, std::span<const u8> input, u32 bytes
                       u32 width, u32 height, u32 depth, u32 block_height, u32 block_depth,
                       u32 stride_alignment, bool native_tiling) {
     const u32 stride = Common::AlignUpLog2(width, stride_alignment) * bytes_per_pixel;
+    if (TryUnswizzleGobs2D(output, input, bytes_per_pixel, width, height, depth, block_height,
+                            block_depth, stride, native_tiling)) {
+        return;
+    }
     const u32 new_bpp = (std::min)(4U, static_cast<u32>(std::countr_zero(width * bytes_per_pixel)));
     width = (width * bytes_per_pixel) >> new_bpp;
     bytes_per_pixel = 1U << new_bpp;

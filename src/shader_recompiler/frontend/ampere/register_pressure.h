@@ -128,11 +128,6 @@ inline RegisterPressure PrepareRegisterPressure(const Instruction& input, u32 re
         operand(16);
         operand(24);
         break;
-    case 0x243: // F2IP reads both byte sources; C remains RZ in the supported modes.
-        operand(16);
-        operand(24);
-        operand(32);
-        break;
     case 0x308:
     case 0x202:
     case 0x245:

@@ -28,6 +28,7 @@
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/memory_manager.h"
+#include "video_core/native_shader_hitch_trace.h"
 #include "video_core/shader_cache.h"
 #include "video_core/shader_environment.h"
 #include "video_core/texture_cache/util.h"
@@ -86,6 +87,9 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
     if (!dirty[VideoCommon::Dirty::Shaders]) {
         return last_shaders_valid;
     }
+    NativeShaderHitchTrace::SlowScope refresh_hitch{
+        "refresh-stages", 0, ~0U,
+        Common::HitchDiagnostic::Enabled() && maxwell3d->GetNativeMacroEngine().native_turing};
     dirty[VideoCommon::Dirty::Shaders] = false;
 
     const GPUVAddr base_addr{maxwell3d->regs.program_region.Address()};
@@ -134,7 +138,12 @@ bool ShaderCache::RefreshStages(std::array<u64, 6>& unique_hashes) try {
                 RethrowIfRejected(*cpu_shader_addr);
                 GraphicsEnvironment env{*maxwell3d, *gpu_memory, program, native ? shader_addr : base_addr,
                                        start_address, {}, support_cooperative_matrix};
+                NativeShaderHitchTrace::SlowScope info_hitch{
+                    "shader-info", shader_addr, static_cast<u32>(env.ShaderStage()),
+                    Common::HitchDiagnostic::Enabled() && native};
+                info_hitch.SourceBytes(env.SourceSizeBytes());
                 shader_info = MakeShaderInfo(env, *cpu_shader_addr);
+                info_hitch.Finish("ok");
             } catch (const Shader::Exception&) {
                 RememberRejection(*cpu_shader_addr, shader_addr);
                 // Once per program: which stage slot it is bound to, its header and the slot's
@@ -207,7 +216,13 @@ const ShaderInfo* ShaderCache::ComputeShader() {
         RethrowIfRejected(*cpu_shader_addr);
         ComputeEnvironment env{*kepler_compute, *gpu_memory, program_base, qmd.program_start,
                                {}, support_cooperative_matrix};
-        return MakeShaderInfo(env, *cpu_shader_addr);
+        NativeShaderHitchTrace::SlowScope info_hitch{
+            "shader-info", shader_addr, static_cast<u32>(env.ShaderStage()),
+            Common::HitchDiagnostic::Enabled() && kepler_compute->IsNativeMode()};
+        info_hitch.SourceBytes(env.SourceSizeBytes());
+        const auto* result = MakeShaderInfo(env, *cpu_shader_addr);
+        info_hitch.Finish("ok");
+        return result;
     } catch (const Shader::Exception&) {
         RememberRejection(*cpu_shader_addr, shader_addr);
         throw;

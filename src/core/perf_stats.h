@@ -7,10 +7,13 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <memory>
 #include <mutex>
 #include "common/common_types.h"
 
 namespace Core {
+
+class FrameTelemetry;
 
 struct PerfStatsResults {
     /// System FPS (LCD VBlanks) in Hz
@@ -56,6 +59,8 @@ private:
 
     /// Title ID for the game that is running. 0 if there is no game running yet
     u64 title_id{0};
+    /// Optional diagnostic stream; absent unless EDEN_FRAME_TELEMETRY_DIR is set.
+    std::unique_ptr<FrameTelemetry> frame_telemetry;
     /// Current index for writing to the perf_history array
     std::size_t current_index{0};
     /// Stores an hour of historical frametime data useful for processing and tracking performance

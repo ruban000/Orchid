@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include <algorithm>
 #include <array>
 #include <bit>
-#include <span>
-#include <utility>
 #include <catch2/catch_test_macros.hpp>
 
 #include "shader_recompiler/frontend/ampere/lower_to_maxwell.h"
@@ -450,20 +447,6 @@ TEST_CASE("Ampere per-tap gathers preserve XY offsets split destinations and pre
     }
 }
 
-// Offsets the lowering cannot prove constant are copied from Rb, Rb+1 into the meta registers
-// R248, R249 (any guard), for a host gather with runtime per-tap offsets.
-bool CopiesPerTapOffsets(std::span<const Instruction> code, u32 source_b) {
-    const auto lowered = LowerToMaxwell(code);
-    if (!lowered) return false;
-    const auto copy = [&](u32 target) {
-        const u64 expected = 0x5c98000000000000ULL | target | (15ULL << 39) |
-                             (u64{source_b + target - 248} << 20);
-        return std::any_of(lowered.instructions.begin(), lowered.instructions.end(),
-                           [&](u64 insn) { return (insn & ~0xf0000ULL) == expected; });
-    };
-    return copy(248) && copy(249);
-}
-
 TEST_CASE("Ampere per-tap gathers prove constants across unrelated arithmetic and gathers",
           "[video_core][ampere]") {
     const std::array<Instruction, 6> code{{
@@ -475,20 +458,18 @@ TEST_CASE("Ampere per-tap gathers prove constants across unrelated arithmetic an
         {{0x0000794d, 0, 0x03800000, 0}},
     }};
     REQUIRE(static_cast<bool>(LowerToMaxwell(code)));
-    REQUIRE_FALSE(CopiesPerTapOffsets(code, 6));
-    // Without the proof the offsets reach the host at run time.
     auto clobber = code;
     clobber[2].words[0] = 0x00067421;
-    REQUIRE(CopiesPerTapOffsets(clobber, 6));
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(clobber)));
     clobber = code;
     clobber[3].words[0] = 0x04067b63;
-    REQUIRE(CopiesPerTapOffsets(clobber, 6));
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(clobber)));
     clobber = code;
     clobber[3].words[2] = 0x041e0f06;
-    REQUIRE(CopiesPerTapOffsets(clobber, 6));
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(clobber)));
     auto branch = code;
     branch[2].words = {0x00007947, 0, 0x03800000, 0};
-    REQUIRE(CopiesPerTapOffsets(branch, 6));
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(branch)));
 }
 
 TEST_CASE("Ampere per-tap gathers reject unknown offsets precision and register aliases",
@@ -503,8 +484,7 @@ TEST_CASE("Ampere per-tap gathers reject unknown offsets precision and register 
         for (u32 shift = 0; shift < 32; shift += 8) {
             auto invalid = code;
             invalid[0].words[1] = (0xff00ff00U & ~(255U << shift)) | (value << shift);
-            REQUIRE(CopiesPerTapOffsets(invalid, 8)); // out of the 6-bit range: not folded
-
+            REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
         }
     }
     for (const u32 bit : {60U, 72U, 76U, 78U, 80U, 81U, 89U, 91U}) { // 79 (.F16) packs half pairs
@@ -514,10 +494,10 @@ TEST_CASE("Ampere per-tap gathers reject unknown offsets precision and register 
     }
     auto invalid = code;
     invalid[0].words[0] = 0x00081802;
-    REQUIRE(CopiesPerTapOffsets(invalid, 8));
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
     invalid = code;
     invalid[1].words[0] = 0x000a7802;
-    REQUIRE(CopiesPerTapOffsets(invalid, 8));
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
     for (const u32 target : {0xf50a7b63U, 0x04f57b63U}) {
         invalid = code;
         invalid[2].words[0] = target;
@@ -529,60 +509,11 @@ TEST_CASE("Ampere per-tap gathers reject unknown offsets precision and register 
     invalid = code;
     invalid[2].words[2] = 0x041e2ff5;
     REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
-    // A branch landing between the offsets and the gather (here on the second offset, and back
-    // onto the gather from after it) could skip them: runtime offsets.
-    const Instruction into_offsets{{0x00007947, 0x10, 0x03800000, 0}};
-    const std::array<Instruction, 5> prefix_branch{into_offsets, code[0], code[1], code[2], code[3]};
-    REQUIRE(CopiesPerTapOffsets(prefix_branch, 8));
-    const Instruction onto_gather{{0x00007947, 0xffffffe0, 0x0383ffff, 0}};
-    const std::array<Instruction, 5> suffix_branch{code[0], code[1], code[2], onto_gather, code[3]};
-    REQUIRE(CopiesPerTapOffsets(suffix_branch, 8));
-    // Landing on the first offset or past the gather runs through both offsets.
-    const Instruction onto_first{{0x00007947, 0, 0x03800000, 0}};
-    const std::array<Instruction, 5> entry_branch{onto_first, code[0], code[1], code[2], code[3]};
-    REQUIRE(static_cast<bool>(LowerToMaxwell(entry_branch)));
-    REQUIRE_FALSE(CopiesPerTapOffsets(entry_branch, 8));
-    const std::array<Instruction, 5> exit_branch{code[0], code[1], code[2], onto_first, code[3]};
-    REQUIRE(static_cast<bool>(LowerToMaxwell(exit_branch)));
-    REQUIRE_FALSE(CopiesPerTapOffsets(exit_branch, 8));
-}
-
-TEST_CASE("Ampere per-tap gathers take guarded IMAD.MOV offsets past branches out",
-          "[video_core][ampere]") {
-    // Ocarina of Time's FSR pass: @!P1 IMAD.MOV.U32 R8/R9 = offsets, @P2 BRA out, unrelated
-    // arithmetic, @!P1 TLD4.PTP.
-    const std::array<Instruction, 6> code{{
-        {{0xff089424, 0xfffeffff, 0x078e00ff, 0x000fe400}},
-        {{0xff099424, 0xfffcfffd, 0x078e00ff, 0x000fe400}},
-        {{0x00002947, 0x20, 0x03800000, 0x000fea00}},
-        {{0x00057421, 0xbf000000, 0x00010000, 0x002fc800}},
-        {{0x040a9b63, 0x33800408, 0x041e2f08, 0x100fc200}},
-        {{0x0000794d, 0, 0x03800000, 0}},
-    }};
-    const auto lowered = LowerToMaxwell(code);
-    REQUIRE(static_cast<bool>(lowered));
-    const auto begin = lowered.instructions.begin() + lowered.source_instruction_offsets[4];
-    REQUIRE(begin[0] == (0x010000000007f000ULL | 248 | (0xfffeffffULL << 20)));
-    REQUIRE(begin[1] == (0x010000000007f000ULL | 249 | (0xfffcfffdULL << 20)));
-    // Each of these breaks the proof, so the offsets go to the host at run time.
-    auto invalid = code;
-    invalid[2].words[1] = 0; // lands between the offsets and the gather
-    REQUIRE(CopiesPerTapOffsets(invalid, 8));
-    invalid = code;
-    invalid[3] = {{0x0000720c, 0x00000001, 0x00720000, 0x000fe200}}; // ISETP writes the guard P1
-    REQUIRE(CopiesPerTapOffsets(invalid, 8));
-    invalid[3].words[2] = 0x00740000; // ISETP writes P2 instead: still proven
-    REQUIRE(static_cast<bool>(LowerToMaxwell(invalid)));
-    REQUIRE_FALSE(CopiesPerTapOffsets(invalid, 8));
-    invalid = code;
-    invalid[3] = {{0x000573c4, 0, 0x00010200, 0x001e2400}}; // predicate outputs not known here
-    REQUIRE(CopiesPerTapOffsets(invalid, 8));
-    invalid = code;
-    invalid[4].words[0] = 0x040a7b63; // an unguarded gather does not see guarded offsets
-    REQUIRE(CopiesPerTapOffsets(invalid, 8));
-    invalid = code;
-    invalid[3].words[0] = 0x00097421; // FADD rewrites R9
-    REQUIRE(CopiesPerTapOffsets(invalid, 8));
+    const Instruction branch{{0x00007947, 0, 0x03800000, 0}};
+    const std::array<Instruction, 5> prefix_branch{branch, code[0], code[1], code[2], code[3]};
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(prefix_branch)));
+    const std::array<Instruction, 5> suffix_branch{code[0], code[1], code[2], branch, code[3]};
+    REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(suffix_branch)));
 }
 TEST_CASE("Ampere mixed texture bindings materialize only the secondary descriptor handle",
           "[video_core][ampere]") {
@@ -800,26 +731,6 @@ TEST_CASE("Ampere F2I lowers truncated 16-bit destinations", "[video_core][amper
     REQUIRE(signed_lowered.instructions.front() == 0x5cb0018000471905ULL);
     signed_code[0].words[3] = 1; // unknown bits stay rejected
     REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(signed_code)));
-}
-
-TEST_CASE("Ampere F2IP to a byte lowers as the byte F2I of its B source", "[video_core][ampere]") {
-    // F2IP.U8.F32.NTZ R9, RZ, R9, RZ (Ocarina of Time): without it the scene's vertex shaders were
-    // rejected, their colour draws skipped and the sky showed through the ground.
-    const Instruction exit{{0x0000794d, 0, 0x03800000, 0}};
-    const std::array<Instruction, 2> packed{{{{0xff097243U, 9, 0x0000c4ffU, 0x000fe400U}}, exit}};
-    const std::array<Instruction, 2> byte{{{{0x00097305U, 9, 0x0020e000U, 0x000fe400U}}, exit}};
-    const auto lowered = LowerToMaxwell(packed);
-    REQUIRE(static_cast<bool>(lowered));
-    const auto expected = LowerToMaxwell(byte);
-    REQUIRE(static_cast<bool>(expected));
-    REQUIRE(lowered.instructions == expected.instructions);
-    // A or C naming a register, other mode bits or source flags stay rejected.
-    for (const auto& [word, value] : std::array<std::pair<u32, u32>, 4>{
-             {{0, 0x04097243U}, {2, 0x0000c404U}, {2, 0x0000c5ffU}, {1, 0x40000009U}}}) {
-        auto invalid = packed;
-        invalid[0].words[word] = value;
-        REQUIRE_FALSE(static_cast<bool>(LowerToMaxwell(invalid)));
-    }
 }
 
 TEST_CASE("Ampere FRND lowers a constant-buffer source", "[video_core][ampere]") {

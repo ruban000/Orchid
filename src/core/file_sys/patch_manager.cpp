@@ -8,7 +8,6 @@
 #include <array>
 #include <cstddef>
 #include <cstring>
-#include <span>
 
 #include "common/assert.h"
 #include "common/hex_util.h"
@@ -48,7 +47,6 @@ constexpr std::array<const char*, 14> EXEFS_FILE_NAMES{
 
 // Built-in patches behind Settings::fps30_patch, matched by NSO build ID (trailing zeros trimmed).
 // Offsets are module offsets of a 4-byte instruction, checked against `expected` before patching.
-// A patch of several words is consecutive entries with the same build ID, applied all or none.
 struct BuiltinPatch {
     std::string_view build_id;
     u32 offset;
@@ -61,30 +59,14 @@ constexpr std::array FPS30_PATCHES{
     // clamp(measured vblanks + 1, min, max) and steps the game by 60 / interval; picking 2
     // (`csel w10, w8, w9, lt` -> `mov w10, #2`) holds it at 30 fps at full speed.
     BuiltinPatch{"E25C90C1C136638885659FD55BF8A03B3403489D", 0x204ac4, 0x1a89b10a, 0x5280004a},
-    // Ocarina of Time main, update v131072 then base v65536: a newer build of the same
-    // controller (larger of CPU and GPU frame time, interval range 1..3). The game hands its
-    // time manager a step of 60 / fps per frame, so 30 fps runs at full speed. The same `csel`
-    // -> `mov w10, #2` covers the measured path. The game also locks the controller at boot
-    // through ForceInterval(1), which is what keeps it at 60 here: that function becomes
-    // ForceInterval(2) (`mov w8, #60` -> `mov w1, #2`, `sdiv w8, w8, w1` -> `mov w8, #30`).
-    BuiltinPatch{"E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348", 0x3b4f004, 0x1a89b10a, 0x5280004a},
-    BuiltinPatch{"E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348", 0x3b4f370, 0x52800788, 0x52800041},
-    BuiltinPatch{"E0F3CCFAF50065AE4EA01EB5AEB13B1A45DA3348", 0x3b4f37c, 0x1ac10d08, 0x528003c8},
-    BuiltinPatch{"33FA6C2C23848282A77E8B88A0A93F4887C55920", 0x3af1994, 0x1a89b10a, 0x5280004a},
-    BuiltinPatch{"33FA6C2C23848282A77E8B88A0A93F4887C55920", 0x3af1d00, 0x52800788, 0x52800041},
-    BuiltinPatch{"33FA6C2C23848282A77E8B88A0A93F4887C55920", 0x3af1d0c, 0x1ac10d08, 0x528003c8},
 };
 
-/// The build's patch words, empty when the option is off or the build has none.
-std::span<const BuiltinPatch> FindFps30Patch(std::string_view build_id) {
+const BuiltinPatch* FindFps30Patch(std::string_view build_id) {
     if (!Settings::values.fps30_patch.GetValue()) {
-        return {};
+        return nullptr;
     }
-    const auto first = std::ranges::find(FPS30_PATCHES, build_id, &BuiltinPatch::build_id);
-    const auto last = std::find_if(first, FPS30_PATCHES.end(), [&](const BuiltinPatch& patch) {
-        return patch.build_id != build_id;
-    });
-    return {first, last};
+    const auto it = std::ranges::find(FPS30_PATCHES, build_id, &BuiltinPatch::build_id);
+    return it != FPS30_PATCHES.end() ? &*it : nullptr;
 }
 
 enum class TitleVersionFormat : u8 {
@@ -477,26 +459,19 @@ std::vector<u8> PatchManager::PatchNSO(const std::vector<u8>& nso, const std::st
     LOG_INFO(Loader, "Patching NSO for name={}, build_id={}", name, build_id);
 
     auto base = nso;
-    const auto fps30_patch = FindFps30Patch(build_id);
-    const auto word_at = [&base](const BuiltinPatch& patch) {
-        const size_t at = sizeof(Loader::NSOHeader) + patch.offset;
+    if (const auto* patch = FindFps30Patch(build_id)) {
+        const size_t at = sizeof(Loader::NSOHeader) + patch->offset;
         u32 word{};
         if (at + sizeof(word) <= base.size()) {
             std::memcpy(&word, base.data() + at, sizeof(word));
         }
-        return word;
-    };
-    const auto mismatch = std::ranges::find_if(
-        fps30_patch, [&](const BuiltinPatch& patch) { return word_at(patch) != patch.expected; });
-    if (mismatch != fps30_patch.end()) {
-        LOG_WARNING(Loader, "    - Built-in 30 FPS patch skipped: {:#010x} at {:#x}, expected {:#010x}",
-                    word_at(*mismatch), mismatch->offset, mismatch->expected);
-    } else if (!fps30_patch.empty()) {
-        for (const BuiltinPatch& patch : fps30_patch) {
-            std::memcpy(base.data() + sizeof(Loader::NSOHeader) + patch.offset, &patch.replacement,
-                        sizeof(patch.replacement));
+        if (word == patch->expected) {
+            std::memcpy(base.data() + at, &patch->replacement, sizeof(word));
+            LOG_INFO(Loader, "    - Applying built-in 30 FPS patch");
+        } else {
+            LOG_WARNING(Loader, "    - Built-in 30 FPS patch skipped: {:#010x} at {:#x}, expected {:#010x}",
+                        word, patch->offset, patch->expected);
         }
-        LOG_INFO(Loader, "    - Applying built-in 30 FPS patch");
     }
 
     const auto load_dir = GetModificationLoadRoot();
@@ -542,7 +517,7 @@ bool PatchManager::HasNSOPatch(const BuildID& build_id_, std::string_view name) 
 
     LOG_INFO(Loader, "Querying NSO patch existence for build_id={}, name={}", build_id, name);
 
-    if (!FindFps30Patch(build_id).empty()) {
+    if (FindFps30Patch(build_id) != nullptr) {
         return true;
     }
 

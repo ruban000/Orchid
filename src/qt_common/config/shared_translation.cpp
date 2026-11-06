@@ -246,7 +246,7 @@ std::unique_ptr<TranslationMap> InitializeTranslations(QObject* parent) {
     INSERT(Settings, fps30_patch, tr("Lock to 30 FPS (game patch)"),
            tr("Patches the game's frame-rate controller to always pick 30 fps, so it runs at full "
               "speed at a steady 30 fps. Only for supported games and versions (Donkey Kong "
-              "Bananza, The Legend of Zelda: Ocarina of Time); others ignore it. Takes effect on the next game start."));
+              "Bananza); others ignore it. Takes effect on the next game start."));
     INSERT(Settings, gpu_unswizzle_enabled, tr("GPU Unswizzle"),
            tr("Accelerates BCn 3D texture decoding using GPU compute.\n"
               "Disable if experiencing crashes or graphical glitches."));

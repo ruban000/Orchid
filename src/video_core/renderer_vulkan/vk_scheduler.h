@@ -20,6 +20,7 @@
 #include "common/settings.h"
 #include "video_core/gpu_split.h"
 #include "video_core/renderer_vulkan/vk_master_semaphore.h"
+#include "video_core/renderer_vulkan/vk_hitch_diagnostic.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
 namespace VideoCommon {
@@ -157,12 +158,16 @@ public:
     /// wait for the recording thread to submit the tick instead, and give up after 20 ms (it may
     /// be waiting for them).
     void Wait(u64 tick, double target_fps = 0.0, bool may_flush = true) {
-        if (tick > 0 && (may_flush || WaitForSubmission(tick))) {
-            if (tick >= master_semaphore->CurrentTick()) {
-                Flush();
+        {
+            HitchTrace::Scope trace{HitchTrace::Event::SchedulerTickWait, tick};
+            if (tick > 0 && (may_flush || WaitForSubmission(tick))) {
+                if (tick >= master_semaphore->CurrentTick()) {
+                    Flush();
+                }
+                master_semaphore->Wait(tick);
             }
-            master_semaphore->Wait(tick);
         }
+        HitchTrace::Scope pacing_trace{HitchTrace::Event::SchedulerPacing, tick};
         if (Settings::values.use_speed_limit.GetValue() && target_fps > 0.0) {
             auto now = std::chrono::steady_clock::now();
             if (last_target_fps != target_fps) {
@@ -270,6 +275,16 @@ private:
         bool HasSubmit() const {
             return submit;
         }
+
+        void MarkDiagnosticQueued(u64 time_ns, size_t queue_depth, u64 logical_tick) {
+            diagnostic_enqueue_ns = time_ns;
+            diagnostic_queue_depth = queue_depth;
+            diagnostic_logical_tick = logical_tick;
+        }
+
+        u64 diagnostic_enqueue_ns{};
+        size_t diagnostic_queue_depth{};
+        u64 diagnostic_logical_tick{};
 
     private:
         Command* first = nullptr;

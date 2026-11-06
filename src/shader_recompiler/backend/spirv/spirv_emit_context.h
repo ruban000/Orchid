@@ -363,7 +363,6 @@ public:
     Id write_storage_cas_loop_func{};
 
     Id load_global_func_u32{};
-    std::array<Id, 2> software_matrix_functions{}; ///< Software HMMA helpers, K=8 and K=16
     Id load_global_func_u32x2{};
     Id load_global_func_u32x4{};
     Id write_global_func_u32{};

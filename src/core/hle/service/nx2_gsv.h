@@ -9,6 +9,7 @@
 #include <thread>
 #include <chrono>
 #include <condition_variable>
+#include <fstream>
 #include <cstring>
 #include <set>
 #include <span>
@@ -30,6 +31,8 @@
 #include "core/hle/service/nx2_gsv_server.h"
 #include "common/alignment.h"
 #include "common/div_ceil.h"
+#include "common/hitch_diagnostic.h"
+#include "common/fs/path_util.h"
 #include "common/settings.h"
 #include "common/swap.h"
 #include "common/thread.h"
@@ -1614,6 +1617,64 @@ private:
         const auto composited = std::chrono::steady_clock::now();
         PaceToVblank(w[12]);
         const auto paced = std::chrono::steady_clock::now();
+        if (Common::HitchDiagnostic::Enabled()) {
+            const s64 trace_begin_ns = Common::HitchDiagnostic::NowNs();
+            const auto ns = [](auto point) -> s64 {
+                return std::chrono::duration_cast<std::chrono::nanoseconds>(
+                           point.time_since_epoch()).count();
+            };
+            const Common::HitchDiagnostic::FrameTimes times{
+                ns(entered), ns(waited), ns(composited), ns(paced)};
+            const auto metrics = Common::HitchDiagnostic::MeasureFrame(
+                times, m_hitch_previous ? &*m_hitch_previous : nullptr);
+            if (!m_hitch_initialized) {
+                m_hitch_initialized = true;
+                const auto path = Common::FS::GetEdenPath(Common::FS::EdenPath::LogDir) /
+                    fmt::format("hitch-frames-{:016x}-{}.csv", Settings::GetCurrentProgramID(),
+                                times.entered);
+                m_hitch_csv = std::make_unique<std::ofstream>(path);
+                if (*m_hitch_csv) {
+                    *m_hitch_csv << "present,entered_ns,waited_ns,composited_ns,paced_ns,gap_us,"
+                                    "external_us,previous_service_us,fence_us,composite_us,pace_us,"
+                                    "service_us\n";
+                    LOG_INFO(Service, "Hitch trace frame CSV: {}", path.string());
+                } else {
+                    LOG_WARNING(Service, "Hitch trace cannot open frame CSV: {}", path.string());
+                    m_hitch_csv.reset();
+                }
+            }
+            if (m_hitch_csv) {
+                *m_hitch_csv << m_presents << ',' << times.entered << ',' << times.waited << ','
+                            << times.composited << ',' << times.paced << ',' << metrics.gap_us << ','
+                            << metrics.external_us << ',' << metrics.previous_service_us << ','
+                            << metrics.fence_us << ',' << metrics.composite_us << ','
+                            << metrics.pace_us << ',' << metrics.service_us << '\n';
+                if (m_presents % 120 == 0 || metrics.gap_us > 33'000 || metrics.fence_us > 20'000) {
+                    m_hitch_csv->flush();
+                }
+            }
+            if (m_hitch_reports < 128 &&
+                (metrics.gap_us > 33'000 || metrics.fence_us > 20'000 ||
+                 metrics.composite_us > 20'000 || metrics.pace_us > 33'000)) {
+                ++m_hitch_reports;
+                LOG_INFO(Service,
+                         "Hitch present={} entered_ns={} waited_ns={} composited_ns={} paced_ns={} "
+                         "gap_us={} external_us={} previous_service_us={} fence_us={} composite_us={} "
+                         "pace_us={}",
+                         m_presents, times.entered, times.waited, times.composited, times.paced,
+                         metrics.gap_us, metrics.external_us, metrics.previous_service_us,
+                         metrics.fence_us, metrics.composite_us, metrics.pace_us);
+            }
+            m_hitch_previous = times;
+            const s64 trace_end_ns = Common::HitchDiagnostic::NowNs();
+            if (trace_end_ns - trace_begin_ns > 5'000'000 && m_hitch_io_reports < 16) {
+                ++m_hitch_io_reports;
+                LOG_INFO(Service,
+                         "Hitch profiler-io present={} start_ns={} end_ns={} duration_us={}",
+                         m_presents, trace_begin_ns, trace_end_ns,
+                         (trace_end_ns - trace_begin_ns) / 1000);
+            }
+        }
         // Where each frame's time goes on the present thread, averaged per 600 presents: the
         // game is blocked here while Eden's GPU thread catches up (fence) and composites.
         {
@@ -1667,6 +1728,11 @@ private:
         u32 presents{};
         std::chrono::steady_clock::time_point last_present{};
     } m_stats{};
+    bool m_hitch_initialized{};
+    u32 m_hitch_reports{};
+    u32 m_hitch_io_reports{};
+    std::unique_ptr<std::ofstream> m_hitch_csv;
+    std::optional<Common::HitchDiagnostic::FrameTimes> m_hitch_previous;
     u32 m_previous_fence_id{~0U}; // none yet (WaitForFrame ignores ids >= 192)
     u32 m_previous_fence_value{};
 

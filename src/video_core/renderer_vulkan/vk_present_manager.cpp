@@ -11,6 +11,7 @@
 #include "video_core/renderer_vulkan/present/lsfg_common.h"
 #endif
 #include "video_core/renderer_vulkan/vk_present_manager.h"
+#include "video_core/renderer_vulkan/vk_hitch_diagnostic.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
 #include "video_core/vulkan_common/vulkan_device.h"
@@ -171,16 +172,23 @@ PresentManager::~PresentManager() = default;
 
 Frame* PresentManager::GetRenderFrame() {
 
-    // Wait for free presentation frames
-    std::unique_lock lock{free_mutex};
-    free_cv.wait(lock, [this] { return !free_queue.empty(); });
-
-    // Take the frame from the queue
-    Frame* frame = free_queue.front();
-    free_queue.pop_front();
+    // Wait for free presentation frames; keep the original lock lifetime through the fence wait.
+    std::unique_lock lock{free_mutex, std::defer_lock};
+    Frame* frame;
+    {
+        HitchTrace::Scope trace{HitchTrace::Event::PresentFrameFree};
+        lock.lock();
+        free_cv.wait(lock, [this] { return !free_queue.empty(); });
+        frame = free_queue.front();
+        free_queue.pop_front();
+        trace.SetItem(frame->index);
+    }
 
     // Wait for the presentation to be finished so all frame resources are free
-    frame->present_done.Wait();
+    {
+        HitchTrace::Scope trace{HitchTrace::Event::PresentFrameFence, frame->index};
+        frame->present_done.Wait();
+    }
     frame->present_done.Reset();
 
     return frame;
@@ -397,6 +405,7 @@ void PresentManager::DiscardFrame(Frame* frame) {
 }
 
 void PresentManager::CopyToSwapchain(Frame* frame) {
+    HitchTrace::Scope trace{HitchTrace::Event::PresentCopy, frame->index};
     bool requires_recreation = surface_recreation_pending;
 
     for (u32 attempt = 0; attempt < MAX_PRESENT_ATTEMPTS; ++attempt) {
@@ -587,9 +596,17 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
 
     // Submit the image copy/blit to the swapchain
     {
-        std::scoped_lock submit_lock{scheduler.submit_mutex};
-        switch (const VkResult result =
-                    device.GetGraphicsQueue().Submit(submit_info, *frame->present_done)) {
+        std::unique_lock submit_lock{scheduler.submit_mutex, std::defer_lock};
+        {
+            HitchTrace::Scope trace{HitchTrace::Event::PresentSubmitMutex, frame->index};
+            submit_lock.lock();
+        }
+        VkResult result;
+        {
+            HitchTrace::Scope trace{HitchTrace::Event::PresentSubmit, frame->index};
+            result = device.GetGraphicsQueue().Submit(submit_info, *frame->present_done);
+        }
+        switch (result) {
         case VK_SUCCESS:
             break;
         case VK_ERROR_DEVICE_LOST:

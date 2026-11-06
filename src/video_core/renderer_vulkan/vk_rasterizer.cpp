@@ -1129,7 +1129,8 @@ void RasterizerVulkan::DispatchCompute() {
     FlushWork();
     gpu_memory->FlushCaching();
 
-    ComputePipeline* const pipeline{pipeline_cache.CurrentComputePipeline()};
+    std::optional<u64> diagnostic_key;
+    ComputePipeline* const pipeline{pipeline_cache.CurrentComputePipeline(diagnostic_key)};
     if (!pipeline) {
         if (kepler_compute->IsNativeMode()) throw Shader::RuntimeError("Native compute pipeline unavailable");
         return;
@@ -1140,8 +1141,8 @@ void RasterizerVulkan::DispatchCompute() {
     SCOPE_EXIT {
         buffer_cache.Nx2CollectListCopies(false);
     };
-    if (!pipeline->Configure(*kepler_compute, *gpu_memory, scheduler, buffer_cache,
-                             texture_cache)) {
+    if (!pipeline->Configure(*kepler_compute, *gpu_memory, scheduler, buffer_cache, texture_cache,
+                             diagnostic_key)) {
         if (kepler_compute->IsNativeMode()) throw Shader::RuntimeError("Native compute resources unavailable");
         return;
     }
