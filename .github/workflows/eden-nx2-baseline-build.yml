@@ -45,8 +45,15 @@ jobs:
           echo 'Android Gradle package configuration:'
           grep -RInE 'applicationId|namespace|dev\\.eden\\.nx2' src/android/app --include='*.gradle' --include='*.gradle.kts' --include='AndroidManifest.xml' || true
 
+      - name: Restore CCache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: eden-nx2-android-ndk-28.2.13676358
+
       - name: Build Eden NX2 Android APK
         working-directory: eden-nx2-android
+        env:
+          CCACHE: 'true'
         run: |
           chmod +x src/android/gradlew
           sh -e .ci/android/build.sh -t standard -b RelWithDebInfo
