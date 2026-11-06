@@ -43,6 +43,7 @@ jobs:
         working-directory: eden-nx2-android
         run: |
           sed -i 's/applicationId = "dev.eden.eden_emulator"/applicationId = "dev.eden.nx2.orchidport"/' src/android/app/build.gradle.kts
+          sed -i 's/applicationId = "dev.eden.nx2"/applicationId = "dev.eden.nx2.orchidport"/' src/android/app/build.gradle.kts
           grep -n 'applicationId =' src/android/app/build.gradle.kts
       
       
