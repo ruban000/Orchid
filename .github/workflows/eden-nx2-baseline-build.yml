@@ -39,6 +39,13 @@ jobs:
           git submodule update --init --recursive
           git log -1 --oneline
 
+     - name: Set unique Android application ID
+        working-directory: eden-nx2-android
+        run: |
+          sed -i 's/applicationId = "dev.eden.eden_emulator"/applicationId = "dev.eden.nx2.orchidport"/' src/android/app/build.gradle.kts
+          grep -n 'applicationId =' src/android/app/build.gradle.kts
+      
+      
       - name: Inspect Android package configuration
         working-directory: eden-nx2-android
         run: |
