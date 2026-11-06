@@ -1,0 +1,60 @@
+name: Android Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Build flavor
+        required: true
+        type: choice
+        options:
+          - standard
+          - optimized
+          - legacy
+          - chromeos
+        default: standard
+      build_type:
+        description: Build type
+        required: true
+        type: choice
+        options:
+          - Release
+          - RelWithDebInfo
+          - Debug
+        default: Release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android build tools
+        run: |
+          sdkmanager "ndk;27.2.12479018" "cmake;3.22.1"
+
+      - name: Build Android APK and AAB
+        run: |
+          chmod +x .ci/android/build.sh
+          .ci/android/build.sh \
+            --release \
+            --target "${{ inputs.target }}" \
+            --build-type "${{ inputs.build_type }}"
+
+      - name: Upload build files
+        uses: actions/upload-artifact@v4
+        with:
+          name: orchid-android-${{ inputs.target }}
+          path: artifacts/*
+          if-no-files-found: error
