@@ -1,0 +1,30 @@
+name: Inspect Eden NX2 Android Source
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Orchid port branch
+        uses: actions/checkout@v4
+
+      - name: Clone Eden NX2 Android
+        run: |
+          git clone --depth 1 --branch nx2-android https://git.eden-emu.dev/moceure/eden-nx2-android.git eden-nx2-android
+          echo "Eden source cloned successfully."
+          git -C eden-nx2-android log -1 --oneline
+
+      - name: Inspect Android build instructions
+        run: |
+          cd eden-nx2-android
+          echo "===== Android developer notes ====="
+          sed -n '1,180p' NX2_ANDROID.md
+          echo "===== Android build script ====="
+          sed -n '1,240p' tools/nx2/android/build_install.sh
+          echo "===== Android-related build files ====="
+          find . -maxdepth 4 -type f \( -name 'gradlew' -o -name 'settings.gradle*' -o -name 'build.gradle*' -o -name 'CMakeLists.txt' \) | head -100
