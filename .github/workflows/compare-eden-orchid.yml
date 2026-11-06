@@ -10,10 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Clone Eden NX2 Android
-        run: git clone --filter=blob:none https://git.eden-emu.dev/moceure/eden-nx2-android.git eden
+        run: git clone https://git.eden-emu.dev/moceure/eden-nx2-android.git eden
 
       - name: Clone Orchid
-        run: git clone --filter=blob:none https://github.com/ruban000/Orchid.git orchid
+        run: git clone https://github.com/ruban000/Orchid.git orchid
 
       - name: Compare source histories
         shell: bash
