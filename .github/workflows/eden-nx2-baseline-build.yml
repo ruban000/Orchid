@@ -1,0 +1,57 @@
+name: Eden NX2 Android Baseline Build
+
+on:
+  push:
+    branches:
+      - eden-android-port
+    paths:
+      - '.github/workflows/eden-nx2-baseline-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
+
+      - name: Install Eden Android build tools
+        run: |
+          sdkmanager "ndk;28.2.13676358" "cmake;3.22.1"
+          sudo apt-get update
+          sudo apt-get install -y glslang-tools
+
+      - name: Clone Eden NX2 Android source
+        run: |
+          git clone --depth 1 --branch nx2-android https://git.eden-emu.dev/moceure/eden-nx2-android.git eden-nx2-android
+          cd eden-nx2-android
+          git submodule update --init --recursive
+          git log -1 --oneline
+
+      - name: Build Eden NX2 Android APK
+        working-directory: eden-nx2-android
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_HOME }}
+          ANDROID_SDK_ROOT: ${{ env.ANDROID_HOME }}
+        run: |
+          chmod +x src/android/gradlew
+          sh -e .ci/android/build.sh -t standard -b RelWithDebInfo
+
+      - name: Upload baseline APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: eden-nx2-android-baseline
+          path: eden-nx2-android/artifacts/*.apk
+          if-no-files-found: error
+          retention-days: 7
