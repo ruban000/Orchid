@@ -1,6 +1,11 @@
 name: Inspect Eden NX2 Android Source
 
 on:
+  push:
+    branches:
+      - eden-android-port
+    paths:
+      - '.github/workflows/inspect-eden-android.yml'
   workflow_dispatch:
 
 permissions:
