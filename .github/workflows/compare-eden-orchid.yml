@@ -1,0 +1,45 @@
+name: Compare Eden NX2 and Orchid
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone Eden NX2 Android
+        run: git clone --filter=blob:none https://git.eden-emu.dev/moceure/eden-nx2-android.git eden
+
+      - name: Clone Orchid
+        run: git clone --filter=blob:none https://github.com/ruban000/Orchid.git orchid
+
+      - name: Compare source histories
+        shell: bash
+        run: |
+          set -e
+          EDEN_HEAD=$(git -C eden rev-parse --short HEAD)
+          ORCHID_HEAD=$(git -C orchid rev-parse --short HEAD)
+          echo "## Repository heads" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Eden: $EDEN_HEAD" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Orchid: $ORCHID_HEAD" >> "$GITHUB_STEP_SUMMARY"
+          echo >> "$GITHUB_STEP_SUMMARY"
+
+          git -C eden fetch "$GITHUB_WORKSPACE/orchid" HEAD:refs/remotes/orchid/head
+          if BASE=$(git -C eden merge-base HEAD refs/remotes/orchid/head 2>/dev/null); then
+            echo "## Shared history" >> "$GITHUB_STEP_SUMMARY"
+            echo "Merge base: `$BASE`" >> "$GITHUB_STEP_SUMMARY"
+            git -C eden log --left-right --cherry-pick --oneline HEAD...refs/remotes/orchid/head | head -200 >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "## No shared Git ancestor detected" >> "$GITHUB_STEP_SUMMARY"
+            echo "The projects must be compared by source files and commit content; no automatic merge will be attempted." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "## Android build entry points" >> "$GITHUB_STEP_SUMMARY"
+          find eden -maxdepth 7 \( -iname '*android*' -o -name 'build_install.sh' -o -name 'settings.gradle*' -o -name 'build.gradle*' \) -type f | head -150 >> "$GITHUB_STEP_SUMMARY"
+
+          echo >> "$GITHUB_STEP_SUMMARY"
+          echo "## Android package identifiers" >> "$GITHUB_STEP_SUMMARY"
+          grep -RIn --include='*.gradle' --include='*.gradle.kts' --include='AndroidManifest.xml' 'applicationId\|package=' eden 2>/dev/null | head -50 >> "$GITHUB_STEP_SUMMARY" || true
